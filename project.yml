@@ -1,0 +1,46 @@
+name: ClaudeMenuBar
+options:
+  bundleIdPrefix: com.claudemenubar
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+
+targets:
+
+  ClaudeMenuBar:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/App
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        LSUIElement: true
+        CFBundleName: ClaudeMenuBar
+        CFBundleDisplayName: Claude Menu Bar
+        CFBundleIdentifier: com.claudemenubar.app
+        CFBundleVersion: "1"
+        CFBundleShortVersionString: "1.0"
+        NSPrincipalClass: NSApplication
+        LSMinimumSystemVersion: "14.0"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.claudemenubar.app
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: YES
+
+  claude-notify:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/CLI
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.claudemenubar.notify
+        CODE_SIGN_STYLE: Automatic
+        INSTALL_PATH: /usr/local/bin
