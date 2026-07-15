@@ -9,156 +9,32 @@ struct FloatingIconView: View {
             // Card background
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(.black.opacity(0.82))
-                .shadow(color: .black.opacity(0.5), radius: 20, x: 0, y: 6)
 
             VStack(spacing: 0) {
-                // ── Icon + state ──────────────────────────────────
-                VStack(spacing: 4) {
-                    Image(systemName: iconName)
-                        .symbolRenderingMode(renderingMode)
-                        .foregroundStyle(iconColor)
-                        .contentTransition(.symbolEffect(.replace.magic(fallback: .replace.offUp)))
-                        .symbolEffect(.breathe.wholeSymbol, isActive: appState.state == .running)
-                        .symbolEffect(.wiggle.wholeSymbol, options: .speed(0.5).repeating, isActive: appState.state == .waiting)
-                        .symbolEffect(.bounce.wholeSymbol, value: appState.state == .done ? 1 : 0)
-                        .font(.system(size: 42, weight: .light))
+                iconHeader
 
-                    Text(stateLabel)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(iconColor.opacity(0.9))
-                        .animation(.easeInOut(duration: 0.2), value: stateLabel)
-                }
-                .padding(.top, 16)
+                sectionDivider
 
-                Divider()
-                    .background(.white.opacity(0.12))
-                    .padding(.horizontal, 12)
-                    .padding(.top, 12)
-                    .padding(.bottom, 10)
+                // ── Active sessions ───────────────────────────────
+                sessionsSection
+
+                sectionDivider
 
                 // ── Model switcher ────────────────────────────────
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("MODEL")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.4))
-                        .tracking(1)
-                        .padding(.horizontal, 14)
+                modelSection
 
-                    HStack(spacing: 6) {
-                        ForEach(appState.modelOptions) { option in
-                            ModelPill(
-                                label: option.label,
-                                isActive: appState.currentModel == option.id
-                            ) {
-                                appState.setModel(option.id)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                }
+                sectionDivider
 
-                // ── Approve button ───────────────────────────────
-                // Approve only appears when the Notification hook fires (Claude is asking for input)
-                if appState.state == .waiting {
-                    VStack(spacing: 4) {
-                        Button(action: { appState.sendApproval() }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 11, weight: .bold))
-                                Text("Approve")
-                                    .font(.system(size: 12, weight: .semibold))
-                                Text("↵")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.black.opacity(0.5))
-                            }
-                            .foregroundStyle(.black)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(Color.green)
-                            )
-                        }
-                        .buttonStyle(.plain)
-
-                        if !appState.isAccessibilityGranted {
-                            Button(action: { appState.sendApproval() }) {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "lock.fill")
-                                        .font(.system(size: 8))
-                                    Text("Grant Accessibility to enable")
-                                        .font(.system(size: 9))
-                                }
-                                .foregroundStyle(.yellow.opacity(0.8))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.top, 2)
-                    .padding(.bottom, 6)
-                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
-                }
-
-                Divider()
-                    .background(.white.opacity(0.12))
-                    .padding(.horizontal, 12)
-                    .padding(.top, appState.state == .running || appState.state == .waiting ? 4 : 10)
-                    .padding(.bottom, 10)
-
-                // ── Activity counts ───────────────────────────────
-                VStack(spacing: 8) {
-                    StatRow(label: "This Session", value: appState.sessionMessages, unit: "msgs", color: iconColor)
-                    StatRow(label: "This Week",    value: appState.weeklyMessages,  unit: "msgs", color: .blue)
-
-                    // Bottom row: mute all | rain toggle | plan limits link
-                    HStack(spacing: 6) {
-                        Button {
-                            appState.isMuted.toggle()
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: appState.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                                    .font(.system(size: 9))
-                                Text(appState.isMuted ? "Muted" : "Sound on")
-                                    .font(.system(size: 9, weight: .medium))
-                            }
-                            .foregroundStyle(appState.isMuted ? .orange.opacity(0.8) : .white.opacity(0.35))
-                        }
-                        .buttonStyle(.plain)
-
-                        Button {
-                            appState.isRainMuted.toggle()
-                        } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: appState.isRainMuted ? "cloud.slash.fill" : "cloud.rain.fill")
-                                    .font(.system(size: 9))
-                                Text("Rain")
-                                    .font(.system(size: 9, weight: .medium))
-                            }
-                            .foregroundStyle(appState.isRainMuted ? .orange.opacity(0.8) : .white.opacity(0.35))
-                        }
-                        .buttonStyle(.plain)
-
-                        Spacer()
-
-                        Button {
-                            NSWorkspace.shared.open(URL(string: "https://claude.ai/settings/limits")!)
-                        } label: {
-                            HStack(spacing: 3) {
-                                Text("Plan limits")
-                                    .font(.system(size: 9, weight: .medium))
-                                Image(systemName: "arrow.up.right")
-                                    .font(.system(size: 8))
-                            }
-                            .foregroundStyle(.white.opacity(0.3))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.top, 2)
-                }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 14)
+                // ── Activity + sound ──────────────────────────────
+                statsSection
             }
+            .padding(.bottom, 14)
+            // Report the natural content height so the panel can size to it.
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(key: PanelHeightKey.self, value: geo.size.height)
+                }
+            )
 
             // Dismiss button on hover
             if isHovered {
@@ -175,9 +51,204 @@ struct FloatingIconView: View {
                 .transition(.opacity.combined(with: .scale))
             }
         }
-        .frame(width: 190)
+        .frame(width: 210)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .shadow(color: .black.opacity(0.5), radius: 20, x: 0, y: 6)
         .onHover { isHovered = $0 }
         .animation(.easeInOut(duration: 0.15), value: isHovered)
+        .onPreferenceChange(PanelHeightKey.self) { height in
+            if height > 0 { appState.panelContentHeight = height }
+        }
+    }
+
+    // MARK: Header (aggregate state)
+
+    private var iconHeader: some View {
+        VStack(spacing: 4) {
+            Image(systemName: iconName)
+                .symbolRenderingMode(renderingMode)
+                .foregroundStyle(iconColor)
+                .contentTransition(.symbolEffect(.replace.magic(fallback: .replace.offUp)))
+                .symbolEffect(.breathe.wholeSymbol, isActive: appState.state == .running)
+                .symbolEffect(.wiggle.wholeSymbol, options: .speed(0.5).repeating, isActive: appState.state == .waiting)
+                .symbolEffect(.bounce.wholeSymbol, value: appState.state == .done ? 1 : 0)
+                .font(.system(size: 42, weight: .light))
+
+            Text(stateLabel)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(iconColor.opacity(0.9))
+                .animation(.easeInOut(duration: 0.2), value: stateLabel)
+        }
+        .padding(.top, 16)
+    }
+
+    private var sectionDivider: some View {
+        Divider()
+            .background(.white.opacity(0.12))
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 10)
+    }
+
+    // MARK: Collapsible section header
+
+    private func sectionHeader(_ title: String, count: Int? = nil, isExpanded: Bool, toggle: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) { toggle() }
+        } label: {
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .tracking(1)
+                if let count, count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(.white.opacity(0.12)))
+                }
+                Spacer()
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .rotationEffect(.degrees(isExpanded ? 0 : -90))
+            }
+            .padding(.horizontal, 14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Sessions section
+
+    private var sessionsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("SESSIONS", count: appState.activeSessions.count, isExpanded: appState.sessionsExpanded) {
+                appState.sessionsExpanded.toggle()
+            }
+
+            if appState.sessionsExpanded {
+                if appState.activeSessions.isEmpty {
+                    Text("No active sessions")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.3))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 4)
+                } else {
+                    // Deterministic height (hug up to 5 rows, then scroll). A
+                    // greedy ScrollView with maxHeight would make the panel's
+                    // measured content height circular and break resizing.
+                    ScrollView {
+                        VStack(spacing: 4) {
+                            ForEach(appState.activeSessions) { session in
+                                SessionRow(
+                                    session: session,
+                                    accessibilityGranted: appState.isAccessibilityGranted,
+                                    onApprove: { appState.sendApproval(for: session.id) },
+                                    onFocus: { appState.focusTerminal(for: session) }
+                                )
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                    }
+                    .frame(height: CGFloat(min(appState.activeSessions.count, 5)) * 38)
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: appState.activeSessions.map(\.id))
+    }
+
+    // MARK: Model section
+
+    private var modelSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("MODEL", isExpanded: appState.modelExpanded) {
+                appState.modelExpanded.toggle()
+            }
+
+            if appState.modelExpanded {
+                HStack(spacing: 6) {
+                    ForEach(appState.modelOptions) { option in
+                        ModelPill(
+                            label: option.label,
+                            isActive: appState.currentModel == option.id
+                        ) {
+                            appState.setModel(option.id)
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+            }
+        }
+    }
+
+    // MARK: Activity + sound section
+
+    private var statsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("ACTIVITY", isExpanded: appState.statsExpanded) {
+                appState.statsExpanded.toggle()
+            }
+
+            if appState.statsExpanded {
+                VStack(spacing: 8) {
+                    StatRow(label: "This Session", value: appState.sessionMessages, unit: "msgs", color: iconColor)
+                    StatRow(label: "This Week",    value: appState.weeklyMessages,  unit: "msgs", color: .blue)
+                    soundRow
+                }
+                .padding(.horizontal, 14)
+            }
+        }
+    }
+
+    // Bottom row: mute all | rain toggle | plan limits link
+    private var soundRow: some View {
+        HStack(spacing: 6) {
+            Button {
+                appState.isMuted.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: appState.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 9))
+                    Text(appState.isMuted ? "Muted" : "Sound on")
+                        .font(.system(size: 9, weight: .medium))
+                }
+                .foregroundStyle(appState.isMuted ? .orange.opacity(0.8) : .white.opacity(0.35))
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                appState.isRainMuted.toggle()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: appState.isRainMuted ? "cloud.slash.fill" : "cloud.rain.fill")
+                        .font(.system(size: 9))
+                    Text("Rain")
+                        .font(.system(size: 9, weight: .medium))
+                }
+                .foregroundStyle(appState.isRainMuted ? .orange.opacity(0.8) : .white.opacity(0.35))
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Button {
+                NSWorkspace.shared.open(URL(string: "https://claude.ai/settings/limits")!)
+            } label: {
+                HStack(spacing: 3) {
+                    Text("Plan limits")
+                        .font(.system(size: 9, weight: .medium))
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 8))
+                }
+                .foregroundStyle(.white.opacity(0.3))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.top, 2)
     }
 
     // MARK: Computed
@@ -214,6 +285,14 @@ struct FloatingIconView: View {
     }
 }
 
+// Reports the panel's natural content height up to the NSPanel wrapper.
+private struct PanelHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 // MARK: Sub-views
 
 private struct ModelPill: View {
@@ -235,6 +314,96 @@ private struct ModelPill: View {
         }
         .buttonStyle(.plain)
         .animation(.easeInOut(duration: 0.15), value: isActive)
+    }
+}
+
+private struct SessionRow: View {
+    let session: Session
+    let accessibilityGranted: Bool
+    let onApprove: () -> Void
+    let onFocus: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(dotColor)
+                .frame(width: 6, height: 6)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(session.displayName)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Text(subtitle)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer(minLength: 4)
+
+            if session.state == .waiting {
+                Button(action: onApprove) {
+                    HStack(spacing: 3) {
+                        Image(systemName: accessibilityGranted ? "checkmark" : "lock.fill")
+                            .font(.system(size: 9, weight: .bold))
+                        Text(accessibilityGranted ? "Approve" : "Grant")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(accessibilityGranted ? Color.green : Color.yellow)
+                    )
+                }
+                .buttonStyle(.plain)
+                .fixedSize()   // keep full "Approve" label; let the name truncate instead
+            } else {
+                Text(stateLabel)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(dotColor.opacity(0.9))
+            }
+        }
+        .frame(height: 34)
+        .contentShape(Rectangle())
+        .onTapGesture { onFocus() }   // click a row → raise its terminal
+    }
+
+    // Prefers "branch · what it's doing"; falls back to the working directory.
+    private var subtitle: String {
+        var parts: [String] = []
+        if let b = session.branch, !b.isEmpty { parts.append(b) }
+        if let a = session.activity, !a.isEmpty { parts.append(a) }
+        if parts.isEmpty { return abbreviatedPath }
+        return parts.joined(separator: " · ")
+    }
+
+    private var abbreviatedPath: String {
+        let home = NSHomeDirectory()
+        return session.cwd.hasPrefix(home) ? "~" + session.cwd.dropFirst(home.count) : session.cwd
+    }
+
+    private var dotColor: Color {
+        switch session.state {
+        case .idle:    .white.opacity(0.4)
+        case .running: .blue
+        case .waiting: .orange
+        case .done:    .green
+        }
+    }
+
+    private var stateLabel: String {
+        switch session.state {
+        case .idle:    "Ready"
+        case .running: "Working"
+        case .waiting: "Waiting"
+        case .done:    "Done"
+        }
     }
 }
 
