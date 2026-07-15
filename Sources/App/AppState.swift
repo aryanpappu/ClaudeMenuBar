@@ -25,6 +25,7 @@ struct Session: Identifiable {
     var transcriptPath: String?
     var branch: String?      // git branch, read from the transcript
     var activity: String?    // short "what it's doing" label (aiTitle / last prompt)
+    var pendingRequest: String?   // when waiting: the tool being requested, e.g. "Bash"
 
     // Folder name of the working directory, e.g. "dynamic-multi-channel".
     var displayName: String {
@@ -150,8 +151,10 @@ final class AppState: ObservableObject {
         let id = info["session_id"].flatMap { $0.isEmpty ? nil : $0 } ?? Self.globalSessionID
         let cwd = info["cwd"] ?? ""
         let transcriptPath = info["transcript_path"].flatMap { $0.isEmpty ? nil : $0 }
+        let request = info["request"]
         let remove = info["remove"] == "1"
         let now = Date()
+        let oldState = sessions[id]?.state
 
         if remove {
             sessions[id] = nil
@@ -160,10 +163,12 @@ final class AppState: ObservableObject {
             existing.lastActivity = now
             if !cwd.isEmpty { existing.cwd = cwd }
             if let transcriptPath { existing.transcriptPath = transcriptPath }
+            existing.pendingRequest = (newState == .waiting) ? request : nil
             sessions[id] = existing
         } else {
             sessions[id] = Session(id: id, cwd: cwd, state: newState, lastActivity: now,
-                                   transcriptPath: transcriptPath)
+                                   transcriptPath: transcriptPath,
+                                   pendingRequest: (newState == .waiting) ? request : nil)
         }
 
         lastActivity = now
@@ -171,6 +176,15 @@ final class AppState: ObservableObject {
         if newState == .done { loadUsageStats() }
         if let path = transcriptPath ?? sessions[id]?.transcriptPath, !remove {
             enrich(sessionID: id, transcriptPath: path)
+        }
+
+        // Notify on entering a new attention state (not on every repeat hook).
+        if !remove, let session = sessions[id], newState != oldState {
+            if newState == .waiting {
+                NotificationManager.shared.notifyWaiting(session: session)
+            } else if newState == .done {
+                NotificationManager.shared.notifyDone(session: session)
+            }
         }
     }
 

@@ -34,19 +34,28 @@ guard valid.contains(command) else {
 
 let payload = readHookPayload()
 
+var userInfo: [String: String] = [:]
+
 // The Notification hook fires for BOTH real permission requests
 // ("Claude needs your permission to use Bash") AND plain idle
 // ("Claude is waiting for your input"). Only the former should surface
 // the Approve button — downgrade the rest to `idle`.
 if command == "waiting", let message = payload?["message"] as? String {
-    if !message.lowercased().contains("permission") {
+    if message.lowercased().contains("permission") {
+        // Extract the requested tool/command, e.g.
+        // "Claude needs your permission to use Bash" → "Bash".
+        if let r = message.range(of: "to use ") {
+            var request = message[r.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            request = request.trimmingCharacters(in: CharacterSet(charactersIn: ".,:;"))
+            if !request.isEmpty { userInfo["request"] = String(request.prefix(40)) }
+        }
+    } else {
         command = "idle"
     }
 }
 
 // `end` is a pseudo-state: post `idle` with a remove flag so the app drops
 // the session from the active list entirely.
-var userInfo: [String: String] = [:]
 if command == "end" {
     command = "idle"
     userInfo["remove"] = "1"

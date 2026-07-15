@@ -374,8 +374,12 @@ private struct SessionRow: View {
         .onTapGesture { onFocus() }   // click a row → raise its terminal
     }
 
-    // Prefers "branch · what it's doing"; falls back to the working directory.
+    // When waiting, lead with what's being requested ("wants Bash"); otherwise
+    // "branch · what it's doing", falling back to the working directory.
     private var subtitle: String {
+        if session.state == .waiting, let req = session.pendingRequest, !req.isEmpty {
+            return "wants \(req)"
+        }
         var parts: [String] = []
         if let b = session.branch, !b.isEmpty { parts.append(b) }
         if let a = session.activity, !a.isEmpty { parts.append(a) }

@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         try? "didFinish".write(toFile: "/tmp/cmb.txt", atomically: true, encoding: .utf8)
+        NotificationManager.shared.setup()
         setupStatusItem()
         setupFloatingPanel()
         try? "done".write(toFile: "/tmp/cmb.txt", atomically: true, encoding: .utf8)
