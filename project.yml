@@ -31,7 +31,11 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.claudemenubar.app
-        CODE_SIGN_STYLE: Automatic
+        # Stable signing identity so the Accessibility (TCC) grant survives rebuilds.
+        # Ad-hoc signatures change hash on every build, silently invalidating the grant.
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "Developer ID Application"
         ENABLE_HARDENED_RUNTIME: YES
 
   claude-notify:
