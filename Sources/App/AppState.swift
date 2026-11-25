@@ -146,7 +146,11 @@ final class AppState: ObservableObject {
         }
     }
 
-    private var ipcListener: IPCListener?
+    private var sessionFiles: SessionFiles?
+    private var lastFileTs: [String: Int64] = [:]   // newest applied ts per session file
+    private var fileSessionIDs: Set<String> = []    // sessions currently backed by a file
+    private var initialLoadDone = false
+    private var sweepCount = 0
     private var sweepTimer: Timer?
     private var usageTracker: UsageTracker?
     var floatingPanel: NSPanel?
@@ -157,8 +161,8 @@ final class AppState: ObservableObject {
     private let runningStaleSeconds: TimeInterval = 1800   // running with no hooks → drop (30 min, crash cleanup)
 
     private init() {
-        ipcListener = IPCListener { [weak self] newState, info in
-            Task { @MainActor [weak self] in self?.apply(newState, info: info) }
+        sessionFiles = SessionFiles { [weak self] files in
+            Task { @MainActor [weak self] in self?.sync(files) }
         }
         SoundManager.shared.isMuted = isMuted
         SoundManager.shared.isRainMuted = isRainMuted
@@ -170,7 +174,38 @@ final class AppState: ObservableObject {
             }
         }
         usageTracker?.poll()    // first full read + arms the file watcher
+        sessionFiles?.rescan()  // loads sessions that were running before launch
+        sessionFiles?.cleanupOldFiles()
         startSweepTimer()       // ages out finished / stale sessions
+    }
+
+    // Applies the current set of session files (docs/PROTOCOL.md). Only files
+    // newer than what was already applied count, so a session the sweep has
+    // dropped isn't brought back by its old file. The first load (app start)
+    // is silent: no banners, no sounds.
+    private func sync(_ files: [SessionFile]) {
+        let silent = !initialLoadDone
+        initialLoadDone = true
+        let present = Set(files.map(\.sessionID))
+
+        // A file that disappeared means `end` (SessionEnd).
+        for id in fileSessionIDs.subtracting(present) where sessions[id] != nil {
+            apply(.idle, info: ["session_id": id, "remove": "1"], silent: silent)
+        }
+        fileSessionIDs = present
+        lastFileTs = lastFileTs.filter { present.contains($0.key) }
+
+        for file in files.sorted(by: { $0.ts < $1.ts }) {
+            guard file.ts > (lastFileTs[file.sessionID] ?? .min) else { continue }
+            lastFileTs[file.sessionID] = file.ts
+            var info = ["session_id": file.sessionID]
+            info["cwd"] = file.cwd
+            info["transcript_path"] = file.transcriptPath
+            info["request"] = file.request
+            info["kind"] = file.kind
+            apply(file.state, info: info, at: file.date, silent: silent)
+        }
+        if silent { sweep() }   // age out what went stale while the app was closed
     }
 
     // MARK: State transitions
@@ -182,7 +217,7 @@ final class AppState: ObservableObject {
         apply(newState, info: sessionID.isEmpty ? [:] : ["session_id": sessionID, "cwd": cwd])
     }
 
-    func apply(_ newState: ClaudeState, info: [String: String]) {
+    func apply(_ newState: ClaudeState, info: [String: String], at now: Date = Date(), silent: Bool = false) {
         // Any local process can post these distributed notifications, so treat
         // every field as untrusted input: bound sizes, validate ids and only
         // accept transcript paths inside ~/.claude/projects.
@@ -192,7 +227,6 @@ final class AppState: ObservableObject {
         let request = info["request"].map { String($0.prefix(40)) }
         let remove = info["remove"] == "1"
         let needsAnswer = newState == .waiting && info["kind"] == "question"
-        let now = Date()
         let oldState = sessions[id]?.state
 
         if remove {
@@ -212,8 +246,8 @@ final class AppState: ObservableObject {
                                    needsAnswer: needsAnswer)
         }
 
-        lastActivity = now
-        refreshAggregate()
+        lastActivity = max(lastActivity ?? now, now)
+        refreshAggregate(playSound: !silent)
         if oldState == nil { loadModel() }   // pick up model changes made elsewhere
         if let path = transcriptPath ?? sessions[id]?.transcriptPath, !remove {
             enrich(sessionID: id, transcriptPath: path)
@@ -224,7 +258,7 @@ final class AppState: ObservableObject {
         if oldState == .waiting && newState != .waiting {
             NotificationManager.shared.clearWaiting(sessionID: id)
         }
-        if !remove, notificationsEnabled, let session = sessions[id], newState != oldState {
+        if !remove, !silent, notificationsEnabled, let session = sessions[id], newState != oldState {
             if newState == .waiting {
                 NotificationManager.shared.notifyWaiting(session: session)
             } else if newState == .done {
@@ -233,7 +267,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private static func isSafeID(_ id: String) -> Bool {
+    nonisolated static func isSafeID(_ id: String) -> Bool {
         !id.isEmpty && id.count <= 100
             && id.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_" }
     }
@@ -306,7 +340,7 @@ final class AppState: ObservableObject {
 
     // Derives the menu-bar/aggregate state from all sessions and drives sound
     // on transitions. Priority: waiting > running > done > idle.
-    private func refreshAggregate() {
+    private func refreshAggregate(playSound: Bool = true) {
         let states = sessions.values.map(\.state)
         let newAggregate: ClaudeState
         if states.contains(.waiting)      { newAggregate = .waiting }
@@ -316,7 +350,7 @@ final class AppState: ObservableObject {
 
         guard newAggregate != state else { return }
         withAnimation(.easeInOut(duration: 0.35)) { state = newAggregate }
-        SoundManager.shared.play(for: newAggregate)
+        if playSound { SoundManager.shared.play(for: newAggregate) }
     }
 
     // MARK: Session ageing
@@ -356,6 +390,10 @@ final class AppState: ObservableObject {
             }
         }
         if changed { refreshAggregate() }
+        // Fallback for missed folder events; hourly clean-up of dead files.
+        sessionFiles?.rescan()
+        sweepCount += 1
+        if sweepCount % 720 == 0 { sessionFiles?.cleanupOldFiles() }
         // Re-arms the history watcher if the file appeared/was replaced, and
         // rolls the counts over at midnight / week start.
         usageTracker?.poll()

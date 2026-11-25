@@ -22,11 +22,8 @@ jobs:
             xcodebuild -project ClaudeMenuBar.xcodeproj -target "$target" \
               -configuration Release SYMROOT="$PWD/build" build | tail -n 3
           done
-      - name: Helper smoke test
-        shell: bash
-        run: |
-          out=$(echo '{"session_id":"ci","hook_event_name":"PreToolUse"}' | build/Release/claude-notify running)
-          test -z "$out" || { echo "helper printed to stdout: $out"; exit 1; }
+      - name: Helper protocol tests
+        run: python3 protocol/run_vectors.py build/Release/claude-notify
       - name: Hook installer test
         run: |
           export HOME="$RUNNER_TEMP/home"; mkdir -p "$HOME/.claude"

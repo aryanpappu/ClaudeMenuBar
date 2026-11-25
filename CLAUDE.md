@@ -22,9 +22,9 @@ The Xcode project is **generated** from `project.yml` by XcodeGen. `ClaudeMenuBa
 ## Two targets
 
 - **`ClaudeMenuBar`** (app). The entry point is `Sources/App/main.swift` (not `@main`; it creates `NSApplication` with `.accessory` policy and the `AppDelegate` in `ClaudeMenuBarApp.swift`).
-- **`claude-notify`** (`Sources/CLI/main.swift`), run by Claude Code hooks. It reads the hook JSON from stdin and posts the DistributedNotification `com.claudemenubar.state.<state>` with `session_id`, `cwd`, `transcript_path` and `request`. Hard rules: **fast** (PreToolUse runs before every tool call), **silent on stdout when run as a hook** (Claude Code adds `UserPromptSubmit`/`SessionStart` stdout to the model context), always exit 0.
-  - `waiting` comes from `PermissionRequest` (uses `tool_name`) or `Notification` with `notification_type == permission_prompt` (or `elicitation_dialog` / `agent_needs_input`). Other notification types become `idle`. The English "permission" text check is only a fallback for old Claude Code versions.
-  - `end` becomes `idle` + `remove=1`.
+- **`claude-notify`** (`Sources/CLI/main.swift`), run by Claude Code hooks. It reads the hook JSON from stdin and writes `~/.claude-menubar/sessions/<session_id>.json` following **docs/PROTOCOL.md**, then posts `com.claudemenubar.changed` as an instant wake-up. Any change to its rules must also change `protocol/vectors.json` (run `python3 protocol/run_vectors.py build/Release/claude-notify`) and the Rust helper in `crossplatform/`. Hard rules: **fast** (PreToolUse runs before every tool call), **silent on stdout when run as a hook** (Claude Code adds `UserPromptSubmit`/`SessionStart` stdout to the model context), always exit 0.
+  - `waiting` comes from `PermissionRequest` (uses `tool_name`) or `Notification` with `notification_type == permission_prompt` (approval) or `elicitation_dialog` / `agent_needs_input` (question). Other notification types are ignored. The English "permission" text check is only a fallback for old Claude Code versions.
+  - `end` deletes the session file.
 
 ## Hooks (installed by `scripts/hooks.py`)
 
@@ -34,7 +34,7 @@ The Xcode project is **generated** from `project.yml` by XcodeGen. `ClaudeMenuBa
 
 `AppState` (`Sources/App/AppState.swift`, `@MainActor` singleton) is the single source of truth.
 
-1. **Hooks → `claude-notify` → DistributedNotificationCenter → `IPCListener` → `AppState.apply(_:info:)`.** Treat `info` as untrusted (any local process can post): ids are validated, sizes capped, and `transcript_path` is accepted only inside `~/.claude/projects` (symlinks resolved).
+1. **Hooks → `claude-notify` → session files → `SessionFiles` (folder watcher + wake-up notification + 5 s rescan) → `AppState.sync` → `apply(_:info:at:silent:)`.** Only files newer than the last applied `ts` count; a vanished file removes the session; the first load at launch is silent. Treat file contents as untrusted: ids are validated, sizes capped, and `transcript_path` is accepted only inside `~/.claude/projects` (symlinks resolved).
 2. **`sessions: [String: Session]`**, keyed by `session_id`. The aggregate `state` (icon, sound) is derived: waiting > running > done > idle.
 3. **Sweep timer (5 s):** done → idle after 30 s; idle dropped after 10 min; running dropped after 30 min of silence (crash cleanup); waiting is never auto-cleared. It also calls `UsageTracker.poll()`.
 4. **Enrichment:** the last 64 KB of the session transcript (lossy UTF-8) gives `gitBranch` and `aiTitle`/`lastPrompt` for the row subtitle.
