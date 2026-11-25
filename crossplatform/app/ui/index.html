@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claude Menu Bar</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="panel" data-state="idle">
+    <header class="hero" data-tauri-drag-region>
+      <div class="hero-icon" aria-hidden="true"></div>
+      <div class="hero-label" id="stateLabel">Ready</div>
+    </header>
+
+    <section>
+      <button class="section-head" data-section="sessions" aria-expanded="true">
+        <span>Sessions</span><span class="count" id="sessionCount">0</span><span class="chev"></span>
+      </button>
+      <ul class="sessions" id="sessions"></ul>
+      <p class="empty" id="emptySessions">No Claude Code sessions yet.</p>
+    </section>
+
+    <section>
+      <button class="section-head" data-section="model" aria-expanded="true"><span>Model</span><span class="chev"></span></button>
+      <div class="pills" id="models"></div>
+      <p class="error" id="modelError" hidden></p>
+    </section>
+
+    <section>
+      <button class="section-head" data-section="activity" aria-expanded="true"><span>Activity</span><span class="chev"></span></button>
+      <div class="stats">
+        <div><span class="dot today"></span>Today<b id="today">0 msgs</b></div>
+        <div><span class="dot week"></span>This Week<b id="week">0 msgs</b></div>
+      </div>
+    </section>
+
+    <footer>
+      <button id="muteBtn" class="link">Sound on</button>
+      <button id="rainBtn" class="link accent">Rain</button>
+      <span class="spacer"></span>
+      <button id="hideBtn" class="link" title="Hide panel (open again from the tray icon)">Hide</button>
+    </footer>
+  </main>
+  <script src="sounds.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
