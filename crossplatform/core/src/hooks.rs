@@ -26,11 +26,19 @@ pub fn quote_posix(text: &str) -> String {
 /// Quote an executable path for the platform's hook shell.
 pub fn quote_helper(path: &Path) -> io::Result<String> {
     let path = path.to_str().ok_or_else(|| invalid("helper path is not UTF-8"))?;
-    Ok(if cfg!(windows) {
-        format!("\"{}\"", path.replace('\\', "/"))
+    if cfg!(windows) {
+        quote_windows(path)
     } else {
-        quote_posix(path)
-    })
+        Ok(quote_posix(path))
+    }
+}
+
+pub(crate) fn quote_windows(path: &str) -> io::Result<String> {
+    let path = path.replace('\\', "/");
+    if path.contains(['$', '`', '"', '\\', '!']) {
+        return Err(invalid("helper path contains unsafe Windows shell characters"));
+    }
+    Ok(format!("\"{path}\""))
 }
 
 /// Read a single shell word, including the adjacent quoted fragments that
@@ -97,16 +105,12 @@ fn groups_array(value: &mut Value) -> io::Result<&mut Vec<Value>> {
     value.as_array_mut().ok_or_else(|| invalid("hook event must contain an array of groups"))
 }
 
-fn commands(group: &Value) -> impl Iterator<Item = &Value> {
-    group.get("hooks").and_then(Value::as_array).into_iter().flatten()
-}
-
 /// Validate the settings file as the Python installer's check command does.
 pub fn check(settings_path: &Path) -> io::Result<()> {
     load_settings(&settings_target(settings_path)?, true).map(|_| ())
 }
 
-/// Append missing hooks. The prefix is already shell-quoted and may include
+/// Add missing hooks and update existing managed commands. The prefix is shell-quoted and may include
 /// the WSL environment assignment produced by the CLI.
 pub fn install(settings_path: &Path, helper_command_prefix: &str, dry_run: bool) -> io::Result<Report> {
     edit(settings_path, dry_run, |settings| {
@@ -114,10 +118,27 @@ pub fn install(settings_path: &Path, helper_command_prefix: &str, dry_run: bool)
         let mut changes = Vec::new();
         for (event, state) in EVENTS {
             let groups = groups_array(hooks.entry(event).or_insert_with(|| json!([])))?;
-            if groups.iter().flat_map(commands).any(is_ours) {
+            let command = format!("{helper_command_prefix} {state}");
+            let mut found = false;
+            let mut replaced = false;
+            for group in groups.iter_mut() {
+                let Some(commands) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                    continue;
+                };
+                for hook in commands.iter_mut().filter(|hook| is_ours(hook)) {
+                    found = true;
+                    if hook["command"].as_str() != Some(command.as_str()) {
+                        hook["command"] = json!(&command);
+                        replaced = true;
+                    }
+                }
+            }
+            if replaced {
+                changes.push(format!("~ {event}: claude-notify {state}"));
+            }
+            if found {
                 continue;
             }
-            let command = format!("{helper_command_prefix} {state}");
             groups.push(json!({
                 "matcher": "",
                 "hooks": [{"type": "command", "command": command}]
@@ -204,6 +225,50 @@ fn edit(
 mod tests {
     use super::*;
     use crate::storage::TestDir;
+
+    #[test]
+    fn windows_quoting_normalizes_separators_and_rejects_expansion() {
+        assert_eq!(quote_windows(r"C:\Program Files\claude-notify.exe").unwrap(),
+                   r#""C:/Program Files/claude-notify.exe""#);
+        for ch in ['$', '`', '"', '!'] {
+            assert!(quote_windows(&format!("C:/unsafe{ch}/claude-notify.exe")).is_err());
+        }
+    }
+
+    #[test]
+    fn install_updates_moved_helper_and_wrong_state_in_place() {
+        let dir = TestDir::new();
+        let path = dir.0.join("settings.json");
+        let old_prefix = "CLAUDE_MENUBAR_DIR='/old sessions' '/old/claude-notify'";
+        let new_prefix = "'/new/claude-notify'";
+        install(&path, old_prefix, false).unwrap();
+        let (settings, _) = load_settings(&path, false).unwrap();
+        let mut settings = Value::Object(settings);
+        let stop = settings["hooks"]["Stop"].as_array_mut().unwrap();
+        stop[0]["hooks"] = json!([
+            {"type":"command", "command":format!("{old_prefix} running"), "timeout":5},
+            {"type":"command", "command":"echo unrelated"}
+        ]);
+        stop.push(json!({"matcher":"Bash", "hooks":[{"type":"command", "command":"echo hello"}]}));
+        fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+
+        let report = install(&path, new_prefix, false).unwrap();
+        let expected_changes: Vec<_> = EVENTS.iter()
+            .map(|(event, state)| format!("~ {event}: claude-notify {state}"))
+            .collect();
+        assert_eq!(report.changes, expected_changes);
+        let bytes = fs::read(&path).unwrap();
+        let updated: Value = serde_json::from_slice(&bytes).unwrap();
+        for (event, state) in EVENTS {
+            settings["hooks"][event][0]["hooks"][0]["command"] = json!(format!("{new_prefix} {state}"));
+        }
+        assert_eq!(updated, settings);
+
+        let report = install(&path, new_prefix, false).unwrap();
+        assert!(report.changes.is_empty());
+        assert!(report.backup.is_none());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
 
     #[test]
     fn install_uninstall_roundtrip() {

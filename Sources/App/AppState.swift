@@ -147,7 +147,7 @@ final class AppState: ObservableObject {
     }
 
     private var sessionFiles: SessionFiles?
-    private var lastFileTs: [String: Int64] = [:]   // newest applied ts per session file
+    private var lastFile: [String: SessionFile] = [:]   // last applied file per session
     private var fileSessionIDs: Set<String> = []    // sessions currently backed by a file
     private var initialLoadDone = false
     private var sweepCount = 0
@@ -193,11 +193,13 @@ final class AppState: ObservableObject {
             apply(.idle, info: ["session_id": id, "remove": "1"], silent: silent)
         }
         fileSessionIDs = present
-        lastFileTs = lastFileTs.filter { present.contains($0.key) }
+        lastFile = lastFile.filter { present.contains($0.key) }
 
         for file in files.sorted(by: { $0.ts < $1.ts }) {
-            guard file.ts > (lastFileTs[file.sessionID] ?? .min) else { continue }
-            lastFileTs[file.sessionID] = file.ts
+            // Newer wins; with an equal ts (two hooks in the same millisecond)
+            // a different file still counts, an unchanged re-read doesn't.
+            if let last = lastFile[file.sessionID], file.ts < last.ts || file == last { continue }
+            lastFile[file.sessionID] = file
             var info = ["session_id": file.sessionID]
             info["cwd"] = file.cwd
             info["transcript_path"] = file.transcriptPath
@@ -268,8 +270,8 @@ final class AppState: ObservableObject {
     }
 
     nonisolated static func isSafeID(_ id: String) -> Bool {
-        !id.isEmpty && id.count <= 100
-            && id.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_" }
+        !id.isEmpty && id.utf8.count <= 100
+            && id.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_") }
     }
 
     private static let transcriptRoot = URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects")

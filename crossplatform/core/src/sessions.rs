@@ -19,6 +19,7 @@ pub enum Event {
 pub struct SessionStore {
     pub sessions: BTreeMap<String, SessionFile>,
     pub last_ts: BTreeMap<String, u64>,
+    last_seen: BTreeMap<String, SessionFile>,
     loaded: bool,
 }
 
@@ -30,7 +31,7 @@ impl SessionStore {
         self.loaded = true;
         let mut snapshot = BTreeMap::<String, SessionFile>::new();
         for file in files {
-            if snapshot.get(&file.session_id).is_some_and(|seen| seen.ts >= file.ts) {
+            if snapshot.get(&file.session_id).is_some_and(|seen| seen.ts > file.ts) {
                 continue;
             }
             snapshot.insert(file.session_id.clone(), file);
@@ -46,10 +47,13 @@ impl SessionStore {
             }
         });
         for (id, file) in snapshot {
-            if self.last_ts.get(&id).is_some_and(|ts| *ts >= file.ts) {
+            if self.last_ts.get(&id).is_some_and(|ts| {
+                *ts > file.ts || (*ts == file.ts && self.last_seen.get(&id) == Some(&file))
+            }) {
                 continue;
             }
             self.last_ts.insert(id.clone(), file.ts);
+            self.last_seen.insert(id.clone(), file.clone());
             match self.sessions.insert(id, file.clone()) {
                 Some(old) => events.push(Event::Changed { old, new: file }),
                 None => events.push(Event::Added { session: file, silent }),
@@ -101,7 +105,9 @@ pub fn cleanup_old_files(dir: &Path, now: u64) -> io::Result<()> {
             continue;
         }
         let path = entry.path();
-        if read_file(&path).is_some_and(expired) && read_file(&path).is_some_and(expired) {
+        if read_file(&path).ok().flatten().is_some_and(expired)
+            && read_file(&path).ok().flatten().is_some_and(expired)
+        {
             match fs::remove_file(&path) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 result => result?,
@@ -136,6 +142,21 @@ mod tests {
         let waiting = file("s", State::Waiting, 19);
         assert_eq!(store.sync_from_files(vec![waiting.clone()], 19),
                    vec![Event::Added { session: waiting, silent: false }]);
+    }
+
+    #[test]
+    fn equal_timestamp_applies_changed_file_once() {
+        let mut store = SessionStore::default();
+        let start = file("s", State::Running, 10);
+        let done = file("s", State::Done, 10);
+        assert_eq!(store.sync_from_files(vec![start.clone()], 10),
+                   vec![Event::Added { session: start.clone(), silent: true }]);
+        assert_eq!(store.sync_from_files(vec![done.clone()], 10),
+                   vec![Event::Changed { old: start, new: done.clone() }]);
+        assert!(store.sync_from_files(vec![done.clone()], 10).is_empty());
+        assert!(store.sweep(10 + DONE_MS));
+        assert!(store.sync_from_files(vec![done], 10 + DONE_MS).is_empty());
+        assert_eq!(store.sessions["s"].state, State::Idle);
     }
 
     #[test]

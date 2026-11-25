@@ -12,6 +12,7 @@ const COLORS = { idle: "var(--idle)", running: "var(--running)", waiting: "var(-
 const $ = id => document.getElementById(id);
 
 let snap = null;
+let rev = -1;           // newest snapshot revision shown
 let lastState = null;   // null until the first snapshot: the first load is silent
 
 function el(tag, cls, text) {
@@ -84,6 +85,8 @@ function renderModels(current) {
 }
 
 function render(s) {
+  if (s.rev <= rev) return;   // an older snapshot arrived late
+  rev = s.rev;
   snap = s;
   document.querySelector(".panel").dataset.state = s.state;
   $("stateLabel").textContent = LABELS[s.state] || s.state;
@@ -110,18 +113,21 @@ document.querySelectorAll(".section-head").forEach(h => h.addEventListener("clic
 $("muteBtn").addEventListener("click", () => {
   const v = !snap.prefs.muted;
   Sounds.setMuted(v, snap.state);
+  snap.prefs.muted = v;
   invoke("set_pref", { key: "muted", value: v }).catch(() => {});
 });
 $("rainBtn").addEventListener("click", () => {
   const v = !snap.prefs.rain_muted;
   Sounds.setRainMuted(v, snap.state);
+  snap.prefs.rain_muted = v;
   invoke("set_pref", { key: "rain_muted", value: v }).catch(() => {});
 });
 $("hideBtn").addEventListener("click", () => invoke("hide_panel").catch(() => {}));
 
-listen("snapshot", e => render(e.payload));
-invoke("get_snapshot").then(s => {
+// Subscribe first, then fetch, so no update can slip in between.
+(async () => {
+  await listen("snapshot", e => render(e.payload));
+  const s = await invoke("get_snapshot");
+  Sounds.init(s.prefs.muted, s.prefs.rain_muted);
   render(s);
-  Sounds.setMuted(s.prefs.muted, null);
-  Sounds.setRainMuted(s.prefs.rain_muted, null);
-}).catch(e => console.error(e));
+})().catch(e => console.error(e));

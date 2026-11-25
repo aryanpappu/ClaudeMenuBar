@@ -70,7 +70,7 @@ struct Extra {
 struct Inner {
     store: SessionStore,
     extra: HashMap<String, Extra>,
-    usage: Option<UsageTracker>,
+    rev: u64,
     today: usize,
     week: usize,
     model: Option<String>,
@@ -78,15 +78,19 @@ struct Inner {
     prefs_path: Option<PathBuf>,
     sessions_dir: Option<PathBuf>,
     settings_path: Option<PathBuf>,
-    projects_root: Option<PathBuf>,
     tray_state: Option<State>,
 }
 
-struct AppData(Mutex<Inner>);
+/// `inner` is held only briefly and never during disk I/O; the usage reader
+/// has its own lock because polling it reads history.jsonl.
+struct AppData {
+    inner: Mutex<Inner>,
+    usage: Mutex<Option<UsageTracker>>,
+}
 
 impl AppData {
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -111,6 +115,8 @@ struct SessionView {
 
 #[derive(Serialize, Clone)]
 struct Snapshot {
+    /// Increases with every snapshot; the UI ignores one older than it has.
+    rev: u64,
     state: State,
     sessions: Vec<SessionView>,
     today: usize,
@@ -130,7 +136,8 @@ fn project_name(session: &SessionFile) -> String {
         .unwrap_or_else(|| session.session_id.chars().take(8).collect())
 }
 
-fn snapshot(inner: &Inner) -> Snapshot {
+fn snapshot(inner: &mut Inner) -> Snapshot {
+    inner.rev += 1;
     let mut sessions: Vec<SessionView> = inner
         .store
         .sessions
@@ -153,6 +160,7 @@ fn snapshot(inner: &Inner) -> Snapshot {
     // Waiting first, then working, done, idle; newest first within a state.
     sessions.sort_by(|a, b| b.state.cmp(&a.state).then(b.last_activity_ms.cmp(&a.last_activity_ms)));
     Snapshot {
+        rev: inner.rev,
         state: inner.store.aggregate_state(),
         sessions,
         today: inner.today,
@@ -199,12 +207,22 @@ fn save_prefs(inner: &Inner) {
     }
 }
 
-/// Reads branch + title from the last 64 KB of a transcript. Only files under
-/// ~/.claude/projects ending in .jsonl are read (file contents are untrusted).
-fn read_extra(projects_root: Option<&Path>, transcript: Option<&str>) -> Extra {
-    let (Some(root), Some(path)) = (projects_root, transcript) else { return Extra::default() };
+/// `~/.claude/projects`, resolved each time: Claude Code may create it after
+/// the app started.
+fn projects_root() -> Option<PathBuf> {
+    paths::claude_dir().ok().and_then(|d| fs::canonicalize(d.join("projects")).ok())
+}
+
+/// Reads branch + title from the last 64 KB of a transcript. Only regular
+/// .jsonl files under ~/.claude/projects are read (paths come from untrusted
+/// session files; a FIFO would block the reader).
+fn read_extra(transcript: Option<&str>) -> Extra {
+    let (Some(root), Some(path)) = (projects_root(), transcript) else { return Extra::default() };
     let Ok(resolved) = fs::canonicalize(path) else { return Extra::default() };
-    if !resolved.starts_with(root) || resolved.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+    if !resolved.starts_with(&root) || resolved.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return Extra::default();
+    }
+    if !fs::metadata(&resolved).is_ok_and(|m| m.is_file()) {
         return Extra::default();
     }
     let Ok(mut file) = fs::File::open(&resolved) else { return Extra::default() };
@@ -252,83 +270,106 @@ fn banner(session: &SessionFile) -> Option<(String, String)> {
 
 fn tick(app: &AppHandle, n: u64) {
     let data = app.state::<AppData>();
+    let now = now_ms();
+    let slow = n % 5 == 0;
+    let (dir, settings) = {
+        let inner = data.lock();
+        (inner.sessions_dir.clone(), inner.settings_path.clone())
+    };
+
+    // 1. Disk reads, without holding the state lock.
+    // A failed scan is skipped: it must not look like every session ended.
+    let files = dir.as_deref().and_then(|d| protocol::scan(d).ok());
+    let model_now = slow.then(|| settings.as_deref().and_then(model::get_model));
+    let counts = if slow {
+        let (day, week) = day_and_week_start();
+        let mut usage = data.usage.lock().unwrap_or_else(|p| p.into_inner());
+        usage.as_mut().and_then(|u| u.poll(day, week).ok())
+    } else {
+        None
+    };
+    if n % 3600 == 0 {
+        if let Some(d) = &dir {
+            let _ = sessions::cleanup_old_files(d, now);
+        }
+    }
+
+    // 2. Apply under the lock.
     let mut banners = Vec::new();
-    let mut emit = None;
-    let mut tray = None;
+    let mut to_enrich = Vec::new();
+    let mut changed = n == 0;
     {
         let mut inner = data.lock();
-        let now = now_ms();
-        let mut changed = n == 0;
-
-        if let Some(dir) = inner.sessions_dir.clone() {
-            let events = inner.store.sync_from_files(protocol::read_all(&dir), now);
-            for event in events {
+        if let Some(files) = files {
+            for event in inner.store.sync_from_files(files, now) {
                 changed = true;
                 match event {
                     Event::Added { session, silent } => {
                         if !silent {
                             banners.extend(banner(&session));
                         }
-                        let extra = read_extra(inner.projects_root.as_deref(), session.transcript_path.as_deref());
-                        inner.extra.insert(session.session_id.clone(), extra);
+                        to_enrich.push((session.session_id.clone(), session.transcript_path.clone()));
                     }
                     Event::Changed { old, new } => {
                         if old.state != new.state {
                             banners.extend(banner(&new));
                         }
-                        let extra = read_extra(inner.projects_root.as_deref(), new.transcript_path.as_deref());
-                        inner.extra.insert(new.session_id.clone(), extra);
+                        to_enrich.push((new.session_id.clone(), new.transcript_path.clone()));
                     }
                     Event::Removed { session } => {
                         inner.extra.remove(&session.session_id);
                     }
                 }
             }
-            if n % 3600 == 0 {
-                let _ = sessions::cleanup_old_files(&dir, now);
-            }
         }
-
-        if n % 5 == 0 {
-            if inner.store.sweep(now) {
-                changed = true;
-                let alive: Vec<String> = inner.store.sessions.keys().cloned().collect();
-                inner.extra.retain(|id, _| alive.contains(id));
-            }
-            let (day, week) = day_and_week_start();
-            if let Some(Ok(counts)) = inner.usage.as_mut().map(|u| u.poll(day, week)) {
-                if (counts.today, counts.week) != (inner.today, inner.week) {
-                    (inner.today, inner.week) = (counts.today, counts.week);
-                    changed = true;
-                }
-            }
-            let current = inner.settings_path.as_deref().and_then(model::get_model);
-            if current != inner.model {
-                inner.model = current;
+        if slow && inner.store.sweep(now) {
+            changed = true;
+            let alive: Vec<String> = inner.store.sessions.keys().cloned().collect();
+            inner.extra.retain(|id, _| alive.contains(id));
+        }
+        if let Some(c) = counts {
+            if (c.today, c.week) != (inner.today, inner.week) {
+                (inner.today, inner.week) = (c.today, c.week);
                 changed = true;
             }
         }
-
+        if let Some(m) = model_now {
+            if m != inner.model {
+                inner.model = m;
+                changed = true;
+            }
+        }
         if !inner.prefs.notifications {
             banners.clear();
         }
-        if changed {
-            let snap = snapshot(&inner);
-            if inner.tray_state != Some(snap.state) {
-                inner.tray_state = Some(snap.state);
-                tray = Some((snap.state, snap.sessions.len()));
+    }
+
+    // 3. Transcript reads (branch, title), again without the lock.
+    if !to_enrich.is_empty() {
+        let extras: Vec<(String, Extra)> =
+            to_enrich.into_iter().map(|(id, path)| (id, read_extra(path.as_deref()))).collect();
+        let mut inner = data.lock();
+        for (id, extra) in extras {
+            if inner.store.sessions.contains_key(&id) {
+                inner.extra.insert(id, extra);
             }
-            emit = Some(snap);
         }
     }
 
     for (title, body) in banners {
         let _ = app.notification().builder().title(title).body(body).show();
     }
-    if let Some((state, count)) = tray {
-        update_tray(app, state, count);
-    }
-    if let Some(snap) = emit {
+    if changed {
+        let (snap, tray) = {
+            let mut inner = data.lock();
+            let snap = snapshot(&mut inner);
+            let tray = (inner.tray_state != Some(snap.state)).then(|| (snap.state, snap.sessions.len()));
+            inner.tray_state = Some(snap.state);
+            (snap, tray)
+        };
+        if let Some((state, count)) = tray {
+            update_tray(app, state, count);
+        }
         let _ = app.emit("snapshot", snap);
     }
 }
@@ -352,11 +393,12 @@ fn update_tray(app: &AppHandle, state: State, count: usize) {
         State::Done => "Done",
     };
     let _ = tray.set_icon(tray_image(state));
-    let _ = tray.set_tooltip(Some(format!("Claude Menu Bar: {label} ({count} sessions)")));
+    let _ = tray.set_tooltip(Some(format!("Claude Menu Bar: {label} ({count} sessions). Menu: Show / hide panel")));
 }
 
 // MARK: Panel window
 
+/// Bottom-right of the usable screen area (inside taskbars and docks).
 fn place_panel(app: &AppHandle) {
     let Some(win) = app.get_webview_window(PANEL) else { return };
     let monitor = win.current_monitor().ok().flatten().or_else(|| win.primary_monitor().ok().flatten());
@@ -369,19 +411,18 @@ fn place_panel(app: &AppHandle) {
         .ok()
         .filter(|s| s.width >= 100 && s.height >= 100)
         .unwrap_or_else(|| tauri::PhysicalSize::new((300.0 * scale) as u32, (480.0 * scale) as u32));
-    let margin = (16.0 * scale) as i32;
-    let taskbar = (56.0 * scale) as i32; // keep clear of a bottom taskbar/panel
-    let area = monitor.size();
-    let origin = monitor.position();
-    let x = origin.x + area.width as i32 - size.width as i32 - margin;
-    let y = origin.y + area.height as i32 - size.height as i32 - taskbar;
-    let _ = win.set_position(PhysicalPosition::new(x.max(origin.x), y.max(origin.y)));
+    let area = monitor.work_area();
+    let margin = (12.0 * scale) as i32;
+    let x = area.position.x + area.size.width as i32 - size.width as i32 - margin;
+    let y = area.position.y + area.size.height as i32 - size.height as i32 - margin;
+    let _ = win.set_position(PhysicalPosition::new(x.max(area.position.x), y.max(area.position.y)));
 }
 
 fn set_panel_visible(app: &AppHandle, visible: bool) {
     if let Some(win) = app.get_webview_window(PANEL) {
         if visible {
             let _ = win.show();
+            place_panel(app);
             let _ = win.set_always_on_top(true);
         } else {
             let _ = win.hide();
@@ -465,7 +506,7 @@ fn tell(app: &AppHandle, result: Result<String, String>) {
 
 #[tauri::command]
 fn get_snapshot(data: tauri::State<'_, AppData>) -> Snapshot {
-    snapshot(&data.lock())
+    snapshot(&mut data.lock())
 }
 
 #[tauri::command]
@@ -480,7 +521,7 @@ fn set_model(app: AppHandle, data: tauri::State<'_, AppData>, model: Option<Stri
         let path = inner.settings_path.clone().ok_or("Can't find ~/.claude/settings.json")?;
         model::set_model(&path, model.as_deref()).map_err(|e| format!("Couldn't change the model: {e}"))?;
         inner.model = model;
-        snapshot(&inner)
+        snapshot(&mut inner)
     };
     let _ = app.emit("snapshot", snap);
     Ok(())
@@ -502,7 +543,7 @@ fn set_pref(app: AppHandle, data: tauri::State<'_, AppData>, key: String, value:
             },
         }
         save_prefs(&inner);
-        snapshot(&inner)
+        snapshot(&mut inner)
     };
     if key == "notifications" {
         if let Some(items) = app.try_state::<TrayItems>() {
@@ -553,7 +594,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 let mut inner = data.lock();
                 inner.prefs.notifications = on;
                 save_prefs(&inner);
-                let _ = app.emit("snapshot", snapshot(&inner));
+                let _ = app.emit("snapshot", snapshot(&mut inner));
             }
             "autostart" => {
                 let launcher = app.autolaunch();
@@ -578,11 +619,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn main() {
-    let claude_dir = paths::claude_dir().ok();
     let inner = Inner {
         store: SessionStore::default(),
         extra: HashMap::new(),
-        usage: paths::history_path().ok().map(UsageTracker::new),
+        rev: 0,
         today: 0,
         week: 0,
         model: None,
@@ -590,7 +630,6 @@ fn main() {
         prefs_path: None,
         sessions_dir: paths::sessions_dir().ok(),
         settings_path: paths::settings_path().ok(),
-        projects_root: claude_dir.and_then(|d| fs::canonicalize(d.join("projects")).ok()),
         tray_state: None,
     };
 
@@ -598,7 +637,10 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| set_panel_visible(app, true)))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
-        .manage(AppData(Mutex::new(inner)))
+        .manage(AppData {
+            inner: Mutex::new(inner),
+            usage: Mutex::new(paths::history_path().ok().map(UsageTracker::new)),
+        })
         .invoke_handler(tauri::generate_handler![get_snapshot, set_model, set_pref, open_session, hide_panel])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -644,7 +686,6 @@ fn main() {
             }
             let show = handle.state::<AppData>().lock().prefs.show_panel;
             set_panel_visible(&handle, show);
-            place_panel(&handle);
 
             thread::spawn(move || {
                 let mut n: u64 = 0;

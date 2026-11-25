@@ -20,8 +20,8 @@ Reviewed on 25 November 2026 by two independent reviewers, Claude Code (Claude O
 | 10 | Preferences (mute, panel, sections) reset on every launch. | Claude | ✅ saved in UserDefaults |
 | 11 | The floating panel could be left off-screen after unplugging a display. | Claude | ✅ moves back on screen-change events |
 | 12 | Debug "Force Running / Idle" buttons were in the public menu and acted on a hidden session. | Claude, Codex | ✅ Debug builds only |
-| 13 | Late or out-of-order events can overwrite newer state or re-create a removed session (events have no sequence number). | Codex | ⏳ add a per-session sequence/timestamp to events |
-| 14 | Restarting the app forgets live sessions until their next hook fires. | Codex | ⏳ see "state files" in [CROSS_PLATFORM.md](CROSS_PLATFORM.md) |
+| 13 | Late or out-of-order events can overwrite newer state or re-create a removed session (events have no sequence number). | Codex | ✅ v1.2: every event carries a timestamp; older events are ignored |
+| 14 | Restarting the app forgets live sessions until their next hook fires. | Codex | ✅ v1.2: session files are reloaded on launch |
 
 ## Security and privacy
 
@@ -73,12 +73,32 @@ After the fixes above, Codex reviewed the changes again and found 14 more proble
 | A CI build failure could be hidden by a pipe | `set -o pipefail` |
 | Three README claims didn't match the app | Corrected |
 
+## Cross-platform review (Codex, v1.2)
+
+Codex reviewed the Windows/Linux port: the protocol, the Swift changes, its own Rust core and Claude's Tauri app. Fixed:
+
+| Issue | Fix |
+|---|---|
+| Hook path in double quotes could still expand `$` or backticks in Git Bash | Paths containing `$`, backtick, `"`, `\` or `!` are refused |
+| Re-installing hooks after moving the helper said "already up to date" | Managed hooks with a different path, prefix or state are replaced |
+| A failed folder scan looked like every session ended | Both apps skip a scan that failed; only a confirmed missing file removes a session |
+| Session files: symlinks, FIFOs or huge files could stall or exhaust the app | Only regular files up to 64 KiB are read (both apps); transcripts must be regular files |
+| Two hooks in the same millisecond: the second was ignored | Equal timestamp + different content is applied (both apps) |
+| Swift reader accepted `true` or `1.5` as numbers and non-ASCII ids | Strict integers and ASCII ids, like the Rust reader |
+| Tauri app read files while holding its state lock | All disk I/O happens outside the lock |
+| An older panel update could overwrite a newer one | Snapshots carry a revision; older ones are dropped |
+| Panel ignored taskbars and docks | Placed inside the monitor's work area on every show |
+| Unmuting replayed the "done" whistle; muting left sounds playing | Fixed |
+| Branch and title stayed blank if `~/.claude/projects` appeared after launch | Looked up lazily |
+
+Known limitation: two helper processes for the *same* session racing within the same instant can still overwrite each other. Claude Code runs one session's hooks one after another, so this hasn't been seen in practice. A cross-process lock would fix it.
+
 ## Feature roadmap
 
 Ranked by value to users. Items marked 🧭 also need the cross-platform core.
 
 1. **Signed download** (no Xcode needed) plus Homebrew cask `brew install --cask claude-menu-bar`.
-2. **Session recovery after restart** 🧭: helper writes small state files, the app reloads them on launch.
+2. ~~Session recovery after restart~~ ✅ done in v1.2.
 3. **Exact "Open session"**: target the exact terminal tab or pane (iTerm2 and Terminal scripting, VS Code URI, tmux pane) instead of matching window titles.
 4. **Hook doctor**: a menu item that checks the hooks, sends a test event and shows the last event per session.
 5. **Per-project alert settings**: mute sounds or banners per project; quiet hours.
@@ -86,4 +106,4 @@ Ranked by value to users. Items marked 🧭 also need the cross-platform core.
 7. **Compact mode and reduced motion**: icon-only panel; respect "Reduce motion".
 8. **Per-session usage**: prompts and duration per session, plus time spent waiting for you.
 9. **Localization**: Nepali and Hindi first.
-10. **Windows and Linux** 🧭: see [CROSS_PLATFORM.md](CROSS_PLATFORM.md).
+10. ~~Windows and Linux~~ ✅ v1.2, see [CROSS_PLATFORM.md](CROSS_PLATFORM.md). Next: Windows code signing, winget, Flatpak.

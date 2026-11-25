@@ -1,6 +1,20 @@
-# Plan: Claude Menu Bar on Windows and Linux
+# Claude Menu Bar on Windows and Linux
 
-Today the app is macOS only. This page explains why, what each part becomes on Windows and Linux, and a step-by-step plan.
+**Status (v1.2, November 2026):** steps 1–4 below are implemented.
+
+| Step | Done |
+|---|---|
+| 1. State files | The macOS app and helper use them (`docs/PROTOCOL.md`). Sessions survive an app restart. |
+| 2. Helper for every OS | Rust `claude-notify` in `crossplatform/notify`, about 2 ms per hook, passes the same 24 shared tests as the Swift helper. |
+| 3. Tray app | Tauri v2 app in `crossplatform/app`. Tested live on Linux (Ubuntu 24.04, ARM64, X11). |
+| 4. Packaging | `.github/workflows/crossplatform.yml` builds `.deb`, `.rpm`, `.AppImage`, `.msi` and `-setup.exe`. |
+
+Not yet done:
+- Code signing for Windows (SmartScreen will warn).
+- Testing on a real Windows 11 machine and on GNOME Wayland. The Windows build is compiled in CI but hasn't been clicked through by a person yet.
+- Flatpak and winget packages.
+
+The rest of this page is the original plan, kept for the reasoning behind it.
 
 ## What ties it to macOS today
 

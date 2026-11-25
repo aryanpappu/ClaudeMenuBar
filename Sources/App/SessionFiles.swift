@@ -47,8 +47,14 @@ final class SessionFiles: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             self.armWatcherIfNeeded()
-            self.onChange(self.readAll())
+            self.publish()
         }
+    }
+
+    /// Reports the files only when the folder could be read completely; a
+    /// failed scan must never look like "every session ended".
+    private func publish() {
+        if let files = readAll() { onChange(files) }
     }
 
     /// Deletes files whose last event is older than 24 h (crashed sessions).
@@ -56,7 +62,7 @@ final class SessionFiles: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Self.maxAgeMs
-            for file in self.readAll() where file.ts < cutoff {
+            for file in self.readAll() ?? [] where file.ts < cutoff {
                 let url = self.url(for: file.sessionID)
                 // Re-read right before deleting: the session may have just woken up.
                 if let fresh = Self.parse(url: url), fresh.ts < cutoff {
@@ -85,15 +91,22 @@ final class SessionFiles: @unchecked Sendable {
                 self.source?.cancel()
                 self.source = nil
             }
-            self.onChange(self.readAll())
+            self.publish()
         }
         src.setCancelHandler { close(fd) }
         src.resume()
         source = src
     }
 
-    private func readAll() -> [SessionFile] {
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
+    private func readAll() -> [SessionFile]? {
+        let names: [String]
+        do {
+            names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return []          // no sessions yet
+        } catch {
+            return nil         // couldn't look: keep the current state
+        }
         return names.compactMap { name in
             guard name.hasSuffix(".json"), !name.hasPrefix("."), name.count <= 105 else { return nil }
             guard let file = Self.parse(url: directory.appendingPathComponent(name)),
@@ -104,12 +117,17 @@ final class SessionFiles: @unchecked Sendable {
 
     /// Validates one file against the protocol; nil if anything is off.
     static func parse(url: URL) -> SessionFile? {
-        guard let data = try? Data(contentsOf: url), data.count < 64 * 1024,
+        // Only small regular files: no symlinks, FIFOs (which would block) or
+        // huge files. attributesOfItem does not follow a final symlink.
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attrs[.type] as? FileAttributeType == .typeRegular,
+              let size = (attrs[.size] as? NSNumber)?.intValue, size <= 64 * 1024,
+              let data = try? Data(contentsOf: url), data.count <= 64 * 1024,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              (json["v"] as? NSNumber)?.intValue == 1,
+              let v = integer(json["v"]), v == 1,
               let id = json["session_id"] as? String, AppState.isSafeID(id),
               let stateRaw = json["state"] as? String, let state = ClaudeState(rawValue: stateRaw),
-              let ts = (json["ts"] as? NSNumber)?.int64Value
+              let ts = integer(json["ts"]), ts >= 0
         else { return nil }
         func text(_ key: String, max: Int) -> String? {
             guard let s = json[key] as? String, !s.isEmpty, s.count <= max else { return nil }
@@ -118,6 +136,13 @@ final class SessionFiles: @unchecked Sendable {
         return SessionFile(sessionID: id, state: state, kind: text("kind", max: 20),
                            request: text("request", max: 40), cwd: text("cwd", max: 1024),
                            transcriptPath: text("transcript_path", max: 1024), ts: ts)
+    }
+
+    /// A JSON integer; rejects booleans and fractions (NSNumber would coerce them).
+    private static func integer(_ value: Any?) -> Int64? {
+        guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
+        let i = n.int64Value
+        return NSNumber(value: i) == n ? i : nil
     }
 
     deinit {

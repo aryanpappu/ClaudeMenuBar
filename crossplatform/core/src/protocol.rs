@@ -3,7 +3,9 @@
 use crate::storage::{atomic_replace, invalid};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{fs, io, path::Path};
+use std::{fs, io::{self, Read}, path::Path};
+
+const MAX_SESSION_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -129,14 +131,35 @@ fn file_name(id: &str) -> String {
     format!("{id}.json")
 }
 
-pub(crate) fn read_file(path: &Path) -> Option<SessionFile> {
-    let name = path.file_name()?.to_str()?;
-    if name.starts_with('.') || !name.ends_with(".json") {
-        return None;
+fn read_session_bytes(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.len() > MAX_SESSION_BYTES {
+        return Ok(None);
     }
-    let session: SessionFile = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    (session.v == 1 && is_safe_id(&session.session_id) && name == file_name(&session.session_id))
+    let mut file = fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    (&mut file).take(MAX_SESSION_BYTES).read_to_end(&mut bytes)?;
+    Ok((file.metadata()?.len() <= MAX_SESSION_BYTES).then_some(bytes))
+}
+
+fn parse_session(path: &Path, bytes: &[u8]) -> Option<SessionFile> {
+    let session: SessionFile = serde_json::from_slice(bytes).ok()?;
+    (session.v == 1 && is_safe_id(&session.session_id)
+        && path.file_stem()?.to_str()? == session.session_id.as_str())
         .then_some(session)
+}
+
+pub(crate) fn read_file(path: &Path) -> io::Result<Option<SessionFile>> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    if name.starts_with('.') || !name.ends_with(".json") {
+        return Ok(None);
+    }
+    Ok(read_session_bytes(path)?.and_then(|bytes| parse_session(path, &bytes)))
 }
 
 pub fn write_atomic(dir: &Path, session: &SessionFile) -> io::Result<()> {
@@ -154,13 +177,13 @@ pub fn write_atomic(dir: &Path, session: &SessionFile) -> io::Result<()> {
     let path = dir.join(file_name(&session.session_id));
     let data = serde_json::to_vec(session).map_err(invalid)?;
     atomic_replace(&path, &data, || {
-        let existing = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
+        let existing = match read_session_bytes(&path) {
+            Ok(Some(bytes)) => parse_session(&path, &bytes),
+            Ok(None) => return Err(invalid("existing session file must be regular and at most 64 KiB")),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
-        let ts = existing.as_ref().and_then(|value| value.get("ts")).and_then(Value::as_u64);
-        Ok(!ts.is_some_and(|ts| ts > session.ts))
+        Ok(!existing.is_some_and(|file| file.ts > session.ts))
     })
 }
 
@@ -175,20 +198,91 @@ pub fn delete(dir: &Path, id: &str) -> io::Result<()> {
 }
 
 pub fn read_all(dir: &Path) -> Vec<SessionFile> {
-    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
-    entries.filter_map(Result::ok).filter_map(|entry| {
-        // Skip directories, symlinks, and special files such as named pipes.
-        if !entry.file_type().ok()?.is_file() {
-            return None;
+    scan(dir).unwrap_or_default()
+}
+
+/// Read a snapshot, skipping invalid session files and entries that disappear.
+pub fn scan(dir: &Path) -> io::Result<Vec<SessionFile>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut sessions = Vec::new();
+    for entry in entries {
+        match entry.and_then(|entry| read_file(&entry.path())) {
+            Ok(Some(session)) => sessions.push(session),
+            Ok(None) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        read_file(&entry.path())
-    }).collect()
+    }
+    Ok(sessions)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::TestDir;
+
+    #[test]
+    fn scan_distinguishes_missing_directory_from_open_error() {
+        let dir = TestDir::new();
+        let path = dir.0.join("sessions");
+        assert!(scan(&path).unwrap().is_empty());
+        fs::write(&path, b"").unwrap();
+        assert!(scan(&path).is_err());
+        assert!(read_all(&path).is_empty());
+    }
+
+    #[test]
+    fn session_reads_validate_version_timestamp_id_and_size() {
+        let dir = TestDir::new();
+        let path = dir.0.join("s1.json");
+        for (version, ts, id) in [
+            ("2", "1", "s1"),
+            ("1.0", "1", "s1"),
+            ("true", "1", "s1"),
+            ("1", "1.5", "s1"),
+            ("1", "1.0", "s1"),
+            ("1", "true", "s1"),
+            ("1", "-1", "s1"),
+            ("1", "1", "other"),
+            ("1", "1", "é"),
+        ] {
+            let json = format!(r#"{{"v":{version},"ts":{ts},"session_id":"{id}","state":"running"}}"#);
+            fs::write(&path, json).unwrap();
+            assert!(scan(&dir.0).unwrap().is_empty(), "{version} {ts} {id}");
+        }
+
+        let mut bytes = br#"{"v":1,"ts":0,"session_id":"s1","state":"running"}"#.to_vec();
+        bytes.resize(MAX_SESSION_BYTES as usize, b' ');
+        fs::write(&path, &bytes).unwrap();
+        let session = scan(&dir.0).unwrap().pop().unwrap();
+        assert_eq!(session.ts, 0);
+        bytes.push(b' ');
+        fs::write(&path, &bytes).unwrap();
+        assert!(scan(&dir.0).unwrap().is_empty());
+        assert!(write_atomic(&dir.0, &session).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_reads_skip_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TestDir::new();
+        let path = dir.0.join("manual.json");
+        let target = dir.0.join("target");
+        let Action::Write(session) = classify("running", None, 1) else {
+            panic!("expected manual session");
+        };
+        fs::write(&target, serde_json::to_vec(&session).unwrap()).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(scan(&dir.0).unwrap().is_empty());
+        assert!(write_atomic(&dir.0, &session).is_err());
+        assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+    }
 
     #[test]
     fn shared_vectors() {

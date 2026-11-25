@@ -1,6 +1,6 @@
 [package]
 name = "claude-menu-bar"
-version = "1.1.0"
+version = "1.2.0"
 description = "Tray app showing the live state of your Claude Code sessions (Windows and Linux)"
 license = "MIT"
 edition.workspace = true

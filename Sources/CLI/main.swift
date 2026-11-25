@@ -94,7 +94,8 @@ if command == "waiting" {
     if payload["hook_event_name"] as? String == "PermissionRequest" {
         record["kind"] = "approval"
         if let tool = payload["tool_name"] as? String, !tool.isEmpty { record["request"] = String(tool.prefix(40)) }
-    } else if let type = payload["notification_type"] as? String {
+    } else if payload["notification_type"] != nil {
+        guard let type = payload["notification_type"] as? String else { exit(0) }
         switch type {
         case "permission_prompt":
             record["kind"] = "approval"

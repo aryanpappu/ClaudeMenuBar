@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.0 (2026-11-25): Windows and Linux
+
+### Added
+- **Windows and Linux app** (Rust + Tauri, `crossplatform/`): tray icon, the same floating panel, banners, sounds, model switch, usage counts, start at login, **Open** for the session's terminal, and one-click hook setup from the tray menu. Installers: `.msi`, `-setup.exe`, `.deb`, `.rpm`, `.AppImage`.
+- Rust `claude-notify` helper (about 2 ms per hook) with `install-hooks`, `uninstall-hooks`, `check-hooks` and `--wsl` for Claude Code inside WSL.
+- `docs/PROTOCOL.md` and 24 shared test cases that both helpers must pass.
+
+### Changed
+- **macOS:** sessions are now stored as small files in `~/.claude-menubar/sessions`, so they survive an app restart. Late hooks can no longer overwrite newer state.
+- Questions from Claude (`elicitation_dialog`) are shown as "has a question", with **Open** instead of Approve.
+
+
 ## 1.1.0 (2026-11-25): first public release
 
 ### Fixed

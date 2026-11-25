@@ -4,12 +4,13 @@
 "use strict";
 const Sounds = (() => {
   let ctx = null, rainNode = null, knockTimer = null, idleTimer = null, gen = 0;
+  const oneShots = new Set();   // whistle / knock buffers still playing
   const cache = {};
   let muted = false, rainMuted = false;
 
   function context() {
     if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
-    if (ctx.state === "suspended") ctx.resume();
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
     clearTimeout(idleTimer);
     return ctx;
   }
@@ -23,12 +24,15 @@ const Sounds = (() => {
   function play(buf, loop = false) {
     const src = context().createBufferSource();
     src.buffer = buf; src.loop = loop; src.connect(ctx.destination); src.start();
+    if (!loop) { oneShots.add(src); src.onended = () => oneShots.delete(src); }
     return src;
   }
   function suspendSoon(ms = 300) {
     clearTimeout(idleTimer);
     const g = gen;
-    idleTimer = setTimeout(() => { if (g === gen && ctx && !rainNode && !knockTimer) ctx.suspend(); }, ms);
+    idleTimer = setTimeout(() => {
+      if (g === gen && ctx && !rainNode && !knockTimer && oneShots.size === 0) ctx.suspend().catch(() => {});
+    }, ms);
   }
 
   const rain = () => {
@@ -52,33 +56,51 @@ const Sounds = (() => {
     return one(0) + one(0.21) + one(0.42);
   });
 
-  function stopAll() {
+  function stopLoops() {
     gen++;
     if (rainNode) { try { rainNode.stop(); } catch (_) {} rainNode = null; }
     clearInterval(knockTimer); knockTimer = null;
   }
+  function stopEverything() {
+    stopLoops();
+    for (const src of oneShots) { try { src.stop(); } catch (_) {} }
+    oneShots.clear();
+  }
 
-  /** Called whenever the overall state changes. */
-  function forState(state) {
-    stopAll();
-    if (muted) { suspendSoon(); return; }
+  /** Continuous sounds for a state: rain (running), knock (waiting). */
+  function loopsFor(state) {
+    if (muted) return;
     const g = gen;
-    switch (state) {
-      case "running":
-        if (rainMuted) { suspendSoon(); break; }
-        rainNode = play(rain(), true); break;
-      case "waiting":
-        play(knock());
-        knockTimer = setInterval(() => { if (g === gen && !muted) play(knock()); }, 2500); break;
-      case "done":
-        play(whistle()); suspendSoon(1050); break;
-      default:
-        suspendSoon();
+    if (state === "running" && !rainMuted) rainNode = play(rain(), true);
+    if (state === "waiting") {
+      play(knock());
+      knockTimer = setInterval(() => { if (g === gen && !muted) play(knock()); }, 2500);
     }
+  }
+
+  /** Called when the overall state changes (a real transition). */
+  function forState(state) {
+    stopLoops();
+    if (muted) { suspendSoon(); return; }
+    if (state === "done") { play(whistle()); suspendSoon(1050); return; }
+    loopsFor(state);
+    if (!rainNode && !knockTimer) suspendSoon();
   }
   return {
     forState,
-    setMuted(v, current) { muted = v; forState(current); },
-    setRainMuted(v, current) { rainMuted = v; if (current === "running") forState(current); },
+    /** Initial settings; plays nothing (the first load is silent). */
+    init(m, r) { muted = m; rainMuted = r; },
+    /** Muting stops everything at once; unmuting resumes only the loops
+     *  (a finished task's whistle is not replayed). */
+    setMuted(v, current) {
+      muted = v;
+      stopEverything();
+      if (!v) loopsFor(current);
+      if (!rainNode && !knockTimer) suspendSoon();
+    },
+    setRainMuted(v, current) {
+      rainMuted = v;
+      if (current === "running") { stopLoops(); loopsFor(current); if (!rainNode) suspendSoon(); }
+    },
   };
 })();
