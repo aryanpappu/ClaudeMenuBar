@@ -16,6 +16,22 @@ A small menu bar / system tray app that shows what your **Claude Code** sessions
 </p>
 <p align="center"><sub>macOS (left) and Linux (right)</sub></p>
 
+## Download
+
+Direct links to the latest release:
+
+| System | Download | How to install |
+|---|---|---|
+| **Windows 10/11** | [ClaudeMenuBar-windows-x64-setup.exe](https://github.com/aryanpappu/ClaudeMenuBar/releases/latest/download/ClaudeMenuBar-windows-x64-setup.exe) · [.msi](https://github.com/aryanpappu/ClaudeMenuBar/releases/latest/download/ClaudeMenuBar-windows-x64.msi) | Run it. If SmartScreen warns, click *More info → Run anyway* (the installer isn't code-signed yet). |
+| **Ubuntu / Debian** | [ClaudeMenuBar-linux-amd64.deb](https://github.com/aryanpappu/ClaudeMenuBar/releases/latest/download/ClaudeMenuBar-linux-amd64.deb) | `sudo apt install ./ClaudeMenuBar-linux-amd64.deb` |
+| **Fedora / openSUSE** | [ClaudeMenuBar-linux-x86_64.rpm](https://github.com/aryanpappu/ClaudeMenuBar/releases/latest/download/ClaudeMenuBar-linux-x86_64.rpm) | `sudo dnf install ./ClaudeMenuBar-linux-x86_64.rpm` |
+| **Any Linux** | [ClaudeMenuBar-linux-amd64.AppImage](https://github.com/aryanpappu/ClaudeMenuBar/releases/latest/download/ClaudeMenuBar-linux-amd64.AppImage) | `chmod +x ClaudeMenuBar-linux-amd64.AppImage` and run it. |
+| **macOS 15+** | [ClaudeMenuBar-macos.zip](https://github.com/aryanpappu/ClaudeMenuBar/releases/latest/download/ClaudeMenuBar-macos.zip) | Unzip, then right-click **Install.command → Open** (not notarized yet). Or build from source, below. |
+
+**After installing on Windows or Linux:** open the tray icon's menu and choose **Set up Claude Code hooks** once. The macOS `Install.command` adds the hooks itself.
+
+Checksums are in `SHA256SUMS-*.txt` on the [release page](https://github.com/aryanpappu/ClaudeMenuBar/releases/latest). There is also a standalone hook helper (`claude-notify-linux-x64`, `claude-notify-windows-x64.exe`) for WSL setups.
+
 > **Unofficial.** This is a community project. It is not made by, affiliated with or endorsed by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic.
 
 ## Requirements (macOS)
@@ -24,7 +40,7 @@ A small menu bar / system tray app that shows what your **Claude Code** sessions
 - Xcode 16 or newer (to build from source)
 - [Claude Code](https://code.claude.com) with hooks support
 
-## Install on macOS
+## Build and install on macOS from source
 
 ```bash
 git clone https://github.com/aryanpappu/ClaudeMenuBar.git
@@ -54,9 +70,7 @@ This removes only this app's hooks (yours are kept), the helper and the app.
 
 A separate tray app (Rust + Tauri) in [`crossplatform/`](crossplatform/README.md) shows the same panel. It uses the same session files and hook rules ([docs/PROTOCOL.md](docs/PROTOCOL.md)).
 
-1. Download the installer for your system from the [latest release](https://github.com/aryanpappu/ClaudeMenuBar/releases), or from the newest successful "windows-linux" run under *Actions*:
-   - Windows: `.msi` or `-setup.exe`
-   - Linux: `.deb`, `.rpm` or `.AppImage`
+1. Download the installer for your system from the [Download](#download) table above.
 2. Start **Claude Menu Bar**. Its icon appears in the system tray.
 3. In the tray menu, choose **Set up Claude Code hooks** once. Restart open Claude Code sessions.
 
