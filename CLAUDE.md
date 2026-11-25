@@ -1,47 +1,59 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (and other contributors) working in this repository.
 
 ## What this is
 
-A macOS menu bar app (`LSUIElement`, no Dock icon) that visualizes the live state of a Claude Code session — the menu bar brain icon and an on-screen floating panel change as Claude transitions through `idle → running → waiting → done`, with synthesized ambient sounds per state. Swift 5.9, SwiftUI + AppKit, macOS 15+ deployment target.
+A macOS menu bar app (`LSUIElement`, no Dock icon) that shows the live state of every Claude Code session: `idle → running → waiting → done`. It has a menu bar icon, a floating panel with one row per session, synthesized sounds and notification banners. Swift (Swift 5 language mode), SwiftUI + AppKit, macOS 15+, Xcode 16+. Public, MIT-licensed; not affiliated with Anthropic.
 
 ## Build & run
 
-The Xcode project is **generated** from `project.yml` by XcodeGen — `ClaudeMenuBar.xcodeproj` is a build artifact, not source. Never hand-edit the `.xcodeproj`; edit `project.yml` and regenerate.
+The Xcode project is **generated** from `project.yml` by XcodeGen. `ClaudeMenuBar.xcodeproj` is git-ignored; never hand-edit it.
 
-- **First-time setup:** `./setup.sh` — installs XcodeGen (via brew) and runs `xcodegen generate`, then prints manual install/hook instructions.
-- **Iterate (the normal loop):** `./rebuild.sh` — regenerates the project, builds the `ClaudeMenuBar` target Release into `./build`, kills the running instance, copies the app to `~/Applications/`, and relaunches it. Use this after any code change.
-- **Regenerate project only:** `xcodegen generate`
-- After editing sound synthesis or panel geometry you must actually run the app to verify — there are no automated tests in this repo.
-
-There is no lint or test suite configured.
+- `./install.sh`: build both targets, install the app to `~/Applications`, the helper to `~/.local/bin/claude-notify`, and add the hooks (`--no-hooks`, `--dry-run-hooks`).
+- `./rebuild.sh`: the normal dev loop; same as `install.sh --no-hooks`.
+- `./uninstall.sh`: remove the hooks (others are kept), the helper and the app.
+- `xcodegen generate`: regenerate the project only.
+- Signing: `Config/Signing.xcconfig` (ad-hoc by default) optionally includes the git-ignored `Config/Signing.local.xcconfig` with a personal identity. A stable identity keeps the Accessibility grant across rebuilds.
+- CI: `.github/workflows/build.yml` builds both targets, checks the helper prints nothing, and tests `scripts/hooks.py`.
+- There are no unit tests yet. After UI, sound or panel changes, run the app and look. You can drive it without Claude Code:
+  `echo '{"session_id":"demo","cwd":"/tmp/x","hook_event_name":"PermissionRequest","tool_name":"Bash"}' | ~/.local/bin/claude-notify waiting`
 
 ## Two targets
 
-- **`ClaudeMenuBar`** (app) — the menu bar UI, floating panel, sound, and state logic. Entry point is `Sources/App/main.swift` (not `@main` — it manually creates `NSApplication` with `.accessory` activation policy and an `AppDelegate`).
-- **`claude-notify`** (CLI tool, installs to `/usr/local/bin`) — tiny binary invoked by Claude Code hooks. `claude-notify <running|waiting|done|idle>` posts a `DistributedNotification` named `com.claudemenubar.state.<state>` that the app listens for.
+- **`ClaudeMenuBar`** (app). The entry point is `Sources/App/main.swift` (not `@main`; it creates `NSApplication` with `.accessory` policy and the `AppDelegate` in `ClaudeMenuBarApp.swift`).
+- **`claude-notify`** (`Sources/CLI/main.swift`), run by Claude Code hooks. It reads the hook JSON from stdin and posts the DistributedNotification `com.claudemenubar.state.<state>` with `session_id`, `cwd`, `transcript_path` and `request`. Hard rules: **fast** (PreToolUse runs before every tool call), **silent on stdout when run as a hook** (Claude Code adds `UserPromptSubmit`/`SessionStart` stdout to the model context), always exit 0.
+  - `waiting` comes from `PermissionRequest` (uses `tool_name`) or `Notification` with `notification_type == permission_prompt` (or `elicitation_dialog` / `agent_needs_input`). Other notification types become `idle`. The English "permission" text check is only a fallback for old Claude Code versions.
+  - `end` becomes `idle` + `remove=1`.
 
-## How state flows in (the core architecture)
+## Hooks (installed by `scripts/hooks.py`)
 
-`AppState` (`Sources/App/AppState.swift`, a `@MainActor` singleton `AppState.shared`) is the single source of truth. State can be driven from **three independent signals**, layered for responsiveness + robustness:
+`UserPromptSubmit`/`PreToolUse` → running · `PermissionRequest`/`Notification` → waiting · `Stop` → done · `SessionEnd` → end. `hooks.py` recognises its own entries by the string `claude-notify`, never duplicates them, backs up `settings.json`, writes atomically and refuses invalid JSON.
 
-1. **Claude Code hooks → `claude-notify` → `DistributedNotificationCenter` → `IPCListener`** — the primary channel. The user wires PreToolUse/Notification/Stop hooks in `~/.claude/settings.json` to call `claude-notify` (see `setup.sh` for the exact JSON). `IPCListener` observes all four state notifications and calls `AppState.apply(_:)`.
-2. **`~/.claude/history.jsonl` file watcher** (`startHistoryWatcher`) — a `DispatchSource` fires the moment the user submits a message, which happens *before* the first PreToolUse hook. This makes extended-thinking phases show "running" from the very start.
-3. **`pgrep -x claude` process watcher** (`startProcessWatcher`, every 3s) — safety net that forces `done` if the CLI process died without a Stop hook firing.
+## State flow (core architecture)
 
-`apply(_:)` animates the transition, triggers `SoundManager.play(for:)`, and on `done` schedules a 30s timer before reverting to `idle` (keeps the ✓ visible while the user types the next message).
+`AppState` (`Sources/App/AppState.swift`, `@MainActor` singleton) is the single source of truth.
 
-## Integration points with the user's Claude config (`~/.claude/`)
+1. **Hooks → `claude-notify` → DistributedNotificationCenter → `IPCListener` → `AppState.apply(_:info:)`.** Treat `info` as untrusted (any local process can post): ids are validated, sizes capped, and `transcript_path` is accepted only inside `~/.claude/projects` (symlinks resolved).
+2. **`sessions: [String: Session]`**, keyed by `session_id`. The aggregate `state` (icon, sound) is derived: waiting > running > done > idle.
+3. **Sweep timer (5 s):** done → idle after 30 s; idle dropped after 10 min; running dropped after 30 min of silence (crash cleanup); waiting is never auto-cleared. It also calls `UsageTracker.poll()`.
+4. **Enrichment:** the last 64 KB of the session transcript (lossy UTF-8) gives `gitBranch` and `aiTitle`/`lastPrompt` for the row subtitle.
 
-This app reads and writes the user's real Claude Code config — be careful here:
-- **`settings.json`** — `loadModel`/`setModel` read and rewrite the `"model"` key when the user picks Haiku/Sonnet/Opus from the menu.
-- **`history.jsonl`** — watched for the submit signal and parsed in `loadUsageStats()` to count today's ("session") and this-week's messages from `timestamp` fields (epoch ms).
+## Integration with the user's Claude config (`~/.claude/`): be careful
 
-## Other notable pieces
+- **`settings.json`:** `setModel` changes only the `model` key ("Auto" removes it). It re-reads right before writing, writes atomically, refuses invalid JSON, and updates the UI only after a successful write. `loadModel` runs at launch and when a new session appears.
+- **`history.jsonl`:** read by `UsageTracker` (serial queue). There is one full read, then only appended bytes. It keeps only this week's timestamps (never prompt text), re-arms its file watcher on delete/rename, and fully re-reads on truncation.
 
-- **`SoundManager`** — synthesizes all audio in-process via `AVAudioEngine` (no bundled audio files): rain hiss loop for `running`, a whistle for `done`, a repeating door-knock for `waiting`. Two independent mutes: `isMuted` (all) and `isRainMuted` (running ambience only).
-- **`FloatingPanel`** — a borderless `.nonactivatingPanel` at `.floating` level, non-key, pinned bottom-right of the screen under the mouse. Retained strongly by `AppDelegate` (a released panel disappears). Subscribes to `appState.$state` via Combine to grow when the approve button appears in `waiting`.
-- **`AppState.sendApproval()`** — synthesizes `y` + Return `CGEvent`s to auto-approve a permission prompt. Requires Accessibility permission (`AXIsProcessTrusted`); prompts for it on first use.
-- **Launch-at-login** via `SMAppService.mainApp`.
-- `Sources/App/main.swift` and `AppDelegate` write breadcrumb strings to `/tmp/cmb.txt` at each startup stage — a launch-debugging aid, not application logic.
+## Other pieces
+
+- **`SoundManager`:** all audio is synthesized with `AVAudioEngine` (rain = running, knock = waiting, whistle = done). The engine starts on demand and pauses after the last sound. Two mutes: everything, and rain only.
+- **`FloatingPanel`:** a borderless non-activating `NSPanel`, always on top, pinned bottom-right; it resizes to the SwiftUI content height (`panelContentHeight`) and comes back on screen when displays change. It must be retained strongly by `AppDelegate`.
+- **`WindowFocuser`:** raises the terminal/editor window whose title contains the project folder name **as a whole word**, and only in allow-listed terminals/editors. The AX calls have a 0.5 s timeout.
+- **`sendApproval`** (One-Click Approve, **opt-in**, default off): only with exactly one matching window (`requireUnique`), and it re-checks the frontmost app just before posting `y` + Return. When it's off, the button and the banner action only open the terminal.
+- **`NotificationManager`:** waiting/done banners. The prompt text is shown only with "Show Prompt in Banners". The waiting banner is removed as soon as the session leaves waiting.
+- **`Prefs`:** UserDefaults-backed toggles (mute, rain, panel, notifications, previews, one-click approve, expanded sections).
+- Debug-only "Force" menu items are behind `#if DEBUG`.
+
+## Docs
+
+`docs/REVIEW.md` lists known issues, fixes and the roadmap. `docs/CROSS_PLATFORM.md` is the Windows/Linux plan (start with the state-files channel).

@@ -14,6 +14,11 @@ final class SoundManager {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private var knockTimer: Timer?
+    private var engineIdleTimer: Timer?
+    // Bumped whenever playback is stopped or restarted. Timer callbacks hop to
+    // the main actor asynchronously, so each one checks that its generation
+    // is still current before touching playback.
+    private var generation = 0
     private let sampleRate: Double = 44100
     private lazy var fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
 
@@ -21,7 +26,9 @@ final class SoundManager {
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: fmt)
         engine.mainMixerNode.outputVolume = 0.85
-        try? engine.start()
+        // The engine is started only when a sound plays and paused again
+        // afterwards: a running AVAudioEngine keeps the audio hardware awake
+        // and costs battery even when it outputs silence.
     }
 
     // MARK: Public
@@ -29,24 +36,45 @@ final class SoundManager {
     func play(for state: ClaudeState) {
         guard !isMuted else { return }
         stopAll()
+        generation += 1   // timers queued by stopAll() must not touch the new sound
         switch state {
         case .running: startRain()
         case .done:    playWhistle()
         case .waiting: startKnock()
-        case .idle:    break
+        case .idle:    pauseEngineSoon()
         }
     }
 
     func stopAll() {
+        generation += 1
         knockTimer?.invalidate()
         knockTimer = nil
+        isLooping = false
         player.stop()
+        pauseEngineSoon()
     }
+
+    /// Pauses the engine shortly after the last one-shot sound, unless a
+    /// looping sound (rain) or the knock timer is still active.
+    private func pauseEngineSoon(after delay: TimeInterval = 0.2) {
+        engineIdleTimer?.invalidate()
+        let gen = generation
+        engineIdleTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.generation == gen,
+                      self.knockTimer == nil, !self.isLooping else { return }
+                self.player.stop()
+                self.engine.pause()
+            }
+        }
+    }
+
+    private var isLooping = false
 
     // MARK: Rain — very quiet ambient hiss (thinking)
 
     private func startRain() {
-        guard !isRainMuted else { return }
+        guard !isRainMuted else { pauseEngineSoon(); return }
         guard let buf = makeBuffer(duration: 2.0, gen: { _, _ in
             Float.random(in: -1...1)
         }) else { return }
@@ -62,6 +90,7 @@ final class SoundManager {
         ensureRunning()
         player.scheduleBuffer(buf, at: nil, options: .loops)
         player.play()
+        isLooping = true
     }
 
     // MARK: Whistle — single ascending-then-descending tone (done)
@@ -78,14 +107,19 @@ final class SoundManager {
         ensureRunning()
         player.scheduleBuffer(buf, at: nil, options: [])
         player.play()
+        pauseEngineSoon(after: dur + 0.3)
     }
 
     // MARK: Door knock — classic "knock knock", repeating (waiting)
 
     private func startKnock() {
         playKnockPattern()
+        let gen = generation
         knockTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.playKnockPattern() }
+            Task { @MainActor [weak self] in
+                guard let self, self.generation == gen, !self.isMuted else { return }
+                self.playKnockPattern()
+            }
         }
     }
 
@@ -119,6 +153,7 @@ final class SoundManager {
     // MARK: Helpers
 
     private func ensureRunning() {
+        engineIdleTimer?.invalidate()
         if !engine.isRunning { try? engine.start() }
     }
 

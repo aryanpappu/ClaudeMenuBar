@@ -1,25 +1,31 @@
 import Foundation
 
 // claude-notify <state>
-// Posts a DistributedNotification that the menu bar app listens for.
-// Install to ~/.local/bin/claude-notify and wire into ~/.claude/settings.json hooks.
 //
-// Reads the hook's JSON payload from stdin (session_id, cwd, message) and
-// forwards session_id + cwd so the app can track sessions individually.
+// Tiny helper run by Claude Code hooks. It reads the hook's JSON payload from
+// stdin and posts a DistributedNotification ("com.claudemenubar.state.<state>")
+// that the menu bar app listens for. Installed to ~/.local/bin by install.sh.
+//
+// Rules for a hook helper:
+//  - Be fast: PreToolUse hooks run before every tool call.
+//  - Print nothing to stdout when run as a hook: for UserPromptSubmit and
+//    SessionStart, Claude Code adds plain stdout to the model's context.
+//  - Never fail the hook: always exit 0 for valid states.
 
 let valid = ["running", "idle", "waiting", "done", "end"]
+let interactive = isatty(STDOUT_FILENO) == 1 && isatty(STDIN_FILENO) == 1
 
 guard CommandLine.arguments.count > 1 else {
     fputs("""
     Usage: claude-notify <state>
     States: \(valid.joined(separator: " | "))
 
-    Example (wire to Claude Code hooks):
-      claude-notify running   # PreToolUse / UserPromptSubmit — session is working
-      claude-notify waiting   # Notification — needs permission (Approve shown)
-      claude-notify done      # Stop — session finished
+    Wire it to Claude Code hooks (install.sh does this for you):
+      claude-notify running   # UserPromptSubmit / PreToolUse: session is working
+      claude-notify waiting   # Notification / PermissionRequest: needs you
+      claude-notify done      # Stop: session finished
       claude-notify idle      # reset a session to ready
-      claude-notify end       # SessionEnd — remove the session from the list
+      claude-notify end       # SessionEnd: remove the session from the list
 
     """, stderr)
     exit(1)
@@ -32,37 +38,60 @@ guard valid.contains(command) else {
     exit(1)
 }
 
+let stdinIsPipe = isatty(STDIN_FILENO) == 0
 let payload = readHookPayload()
-
 var userInfo: [String: String] = [:]
 
-// The Notification hook fires for BOTH real permission requests
-// ("Claude needs your permission to use Bash") AND plain idle
-// ("Claude is waiting for your input"). Only the former should surface
-// the Approve button — downgrade the rest to `idle`.
-if command == "waiting", let message = payload?["message"] as? String {
-    if message.lowercased().contains("permission") {
-        // Extract the requested tool/command, e.g.
-        // "Claude needs your permission to use Bash" → "Bash".
-        if let r = message.range(of: "to use ") {
-            var request = message[r.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
-            request = request.trimmingCharacters(in: CharacterSet(charactersIn: ".,:;"))
-            if !request.isEmpty { userInfo["request"] = String(request.prefix(40)) }
+// Piped input that isn't a JSON object: something is wrong, so don't guess
+// a session (that would create a fake global "waiting" row).
+if stdinIsPipe && payload == nil && command != "running" { exit(0) }
+
+if command == "waiting", let payload {
+    let event = payload["hook_event_name"] as? String
+    if event == "PermissionRequest" {
+        // A real permission prompt: the tool is named directly.
+        if let tool = payload["tool_name"] as? String, !tool.isEmpty {
+            userInfo["request"] = String(tool.prefix(40))
+        }
+    } else if let type = payload["notification_type"] as? String {
+        // Notification hook: only a permission prompt (or a question for the
+        // user) should show "waiting"; everything else just means idle.
+        switch type {
+        case "permission_prompt":
+            if let message = payload["message"] as? String,
+               let tool = toolName(fromMessage: message) {
+                userInfo["request"] = tool
+            }
+        case "elicitation_dialog", "agent_needs_input":
+            userInfo["kind"] = "question"   // needs a typed answer, not y/n
+        default:
+            // Login results, quota notices, idle reminders… are not about
+            // this session's state: leave it unchanged.
+            exit(0)
+        }
+    } else if let message = payload["message"] as? String {
+        // Older Claude Code without notification_type: fall back to the text.
+        if message.lowercased().contains("permission") {
+            if let tool = toolName(fromMessage: message) { userInfo["request"] = tool }
+        } else {
+            exit(0)
         }
     } else {
-        command = "idle"
+        exit(0)
     }
 }
 
 // `end` is a pseudo-state: post `idle` with a remove flag so the app drops
-// the session from the active list entirely.
+// the session from the list entirely.
 if command == "end" {
     command = "idle"
     userInfo["remove"] = "1"
 }
-if let sid = payload?["session_id"] as? String, !sid.isEmpty { userInfo["session_id"] = sid }
-if let cwd = payload?["cwd"] as? String, !cwd.isEmpty { userInfo["cwd"] = cwd }
-if let tp = payload?["transcript_path"] as? String, !tp.isEmpty { userInfo["transcript_path"] = tp }
+if let sid = payload?["session_id"] as? String, isSafeID(sid) { userInfo["session_id"] = sid }
+if let cwd = payload?["cwd"] as? String, !cwd.isEmpty, cwd.count < 1024 { userInfo["cwd"] = cwd }
+if let tp = payload?["transcript_path"] as? String, !tp.isEmpty, tp.count < 1024 {
+    userInfo["transcript_path"] = tp
+}
 
 DistributedNotificationCenter.default().postNotificationName(
     .init("com.claudemenubar.state.\(command)"),
@@ -71,14 +100,30 @@ DistributedNotificationCenter.default().postNotificationName(
     deliverImmediately: true
 )
 
-// Brief sleep so the notification delivers before the process exits
-Thread.sleep(forTimeInterval: 0.15)
-print("→ claude state: \(command)")
+// Give distnoted a moment to take the message before the process exits.
+Thread.sleep(forTimeInterval: 0.03)
+if interactive { print("→ claude state: \(command)") }
 
-// Reads the hook's JSON payload from stdin. Returns nil when there's no
-// piped input (e.g. run manually) so we fall back to the state argument.
+// MARK: Helpers
+
+// "Claude needs your permission to use Bash" → "Bash"
+func toolName(fromMessage message: String) -> String? {
+    guard let r = message.range(of: "to use ") else { return nil }
+    let tool = message[r.upperBound...]
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .trimmingCharacters(in: CharacterSet(charactersIn: ".,:;"))
+    return tool.isEmpty ? nil : String(tool.prefix(40))
+}
+
+func isSafeID(_ id: String) -> Bool {
+    !id.isEmpty && id.count <= 100
+        && id.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_" }
+}
+
+// Reads the hook's JSON payload from stdin. Returns nil when run by hand from
+// a terminal (no piped input), so the state argument alone is used.
 func readHookPayload() -> [String: Any]? {
-    guard isatty(FileHandle.standardInput.fileDescriptor) == 0 else { return nil }
+    guard isatty(STDIN_FILENO) == 0 else { return nil }
     let data = FileHandle.standardInput.readDataToEndOfFile()
     guard !data.isEmpty,
           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }

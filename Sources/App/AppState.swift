@@ -26,6 +26,7 @@ struct Session: Identifiable {
     var branch: String?      // git branch, read from the transcript
     var activity: String?    // short "what it's doing" label (aiTitle / last prompt)
     var pendingRequest: String?   // when waiting: the tool being requested, e.g. "Bash"
+    var needsAnswer = false       // waiting for a typed answer (a question), not a yes/no approval
 
     // Folder name of the working directory, e.g. "dynamic-multi-channel".
     var displayName: String {
@@ -45,9 +46,15 @@ final class AppState: ObservableObject {
 
     // Which panel sections are expanded. These live here (not view-local) so
     // the panel can resize itself when any of them toggles.
-    @Published var sessionsExpanded: Bool = true
-    @Published var modelExpanded: Bool = true
-    @Published var statsExpanded: Bool = true
+    @Published var sessionsExpanded: Bool = Prefs.bool("sessionsExpanded", default: true) {
+        didSet { Prefs.set(sessionsExpanded, "sessionsExpanded") }
+    }
+    @Published var modelExpanded: Bool = Prefs.bool("modelExpanded", default: true) {
+        didSet { Prefs.set(modelExpanded, "modelExpanded") }
+    }
+    @Published var statsExpanded: Bool = Prefs.bool("statsExpanded", default: true) {
+        didSet { Prefs.set(statsExpanded, "statsExpanded") }
+    }
 
     // Natural content height reported by the SwiftUI view; the floating panel
     // resizes itself to match. Seeded with a sensible first-render estimate.
@@ -83,19 +90,26 @@ final class AppState: ObservableObject {
     @Published var lastActivity: Date?
 
     // MARK: Model
+    // "default" removes the "model" key so Claude Code uses its own default.
+    static let defaultModelID = "default"
     let modelOptions: [ModelOption] = [
+        ModelOption(id: AppState.defaultModelID, label: "Auto"),
         ModelOption(id: "haiku",  label: "Haiku"),
         ModelOption(id: "sonnet", label: "Sonnet"),
         ModelOption(id: "opus",   label: "Opus"),
     ]
-    @Published var currentModel: String = "sonnet"
+    @Published var currentModel: String = AppState.defaultModelID
 
     // MARK: Sound
-    @Published var isMuted: Bool = false {
-        didSet { SoundManager.shared.isMuted = isMuted }
-    }
-    @Published var isRainMuted: Bool = false {
+    @Published var isMuted: Bool = Prefs.bool("isMuted", default: false) {
         didSet {
+            Prefs.set(isMuted, "isMuted")
+            SoundManager.shared.isMuted = isMuted
+        }
+    }
+    @Published var isRainMuted: Bool = Prefs.bool("isRainMuted", default: false) {
+        didSet {
+            Prefs.set(isRainMuted, "isRainMuted")
             SoundManager.shared.isRainMuted = isRainMuted
             if state == .running {
                 if isRainMuted { SoundManager.shared.stopAll() }
@@ -106,12 +120,27 @@ final class AppState: ObservableObject {
 
     // MARK: Usage
     @Published var weeklyMessages: Int = 0
-    @Published var sessionMessages: Int = 0   // today's messages from history.jsonl
+    @Published var todayMessages: Int = 0     // today's prompts from history.jsonl
 
     // MARK: Misc
     @Published var launchAtLoginEnabled: Bool = (SMAppService.mainApp.status == .enabled)
-    @Published var showFloatingIcon: Bool = true {
+    // Typing "y + Return" into a terminal is powerful and can hit the wrong
+    // prompt, so one-click Approve is opt-in. When off, the row button just
+    // opens the session's terminal.
+    @Published var oneClickApprove: Bool = Prefs.bool("oneClickApprove", default: false) {
+        didSet { Prefs.set(oneClickApprove, "oneClickApprove") }
+    }
+    // Show the session's title / last prompt in notification banners. Off by
+    // default: banners can appear in screen shares and on the lock screen.
+    @Published var notificationPreviews: Bool = Prefs.bool("notificationPreviews", default: false) {
+        didSet { Prefs.set(notificationPreviews, "notificationPreviews") }
+    }
+    @Published var notificationsEnabled: Bool = Prefs.bool("notificationsEnabled", default: true) {
+        didSet { Prefs.set(notificationsEnabled, "notificationsEnabled") }
+    }
+    @Published var showFloatingIcon: Bool = Prefs.bool("showFloatingIcon", default: true) {
         didSet {
+            Prefs.set(showFloatingIcon, "showFloatingIcon")
             if showFloatingIcon { floatingPanel?.orderFrontRegardless() }
             else                { floatingPanel?.orderOut(nil) }
         }
@@ -119,8 +148,7 @@ final class AppState: ObservableObject {
 
     private var ipcListener: IPCListener?
     private var sweepTimer: Timer?
-    private var historyWatcher: DispatchSourceFileSystemObject?
-    private var historyFD: Int32 = -1
+    private var usageTracker: UsageTracker?
     var floatingPanel: NSPanel?
 
     // How long a session lingers after finishing / going quiet.
@@ -132,9 +160,16 @@ final class AppState: ObservableObject {
         ipcListener = IPCListener { [weak self] newState, info in
             Task { @MainActor [weak self] in self?.apply(newState, info: info) }
         }
+        SoundManager.shared.isMuted = isMuted
+        SoundManager.shared.isRainMuted = isRainMuted
         loadModel()
-        loadUsageStats()
-        startHistoryWatcher()   // refreshes usage counts as messages are sent
+        usageTracker = UsageTracker { [weak self] today, week in
+            Task { @MainActor [weak self] in
+                self?.todayMessages = today
+                self?.weeklyMessages = week
+            }
+        }
+        usageTracker?.poll()    // first full read + arms the file watcher
         startSweepTimer()       // ages out finished / stale sessions
     }
 
@@ -148,11 +183,15 @@ final class AppState: ObservableObject {
     }
 
     func apply(_ newState: ClaudeState, info: [String: String]) {
-        let id = info["session_id"].flatMap { $0.isEmpty ? nil : $0 } ?? Self.globalSessionID
-        let cwd = info["cwd"] ?? ""
-        let transcriptPath = info["transcript_path"].flatMap { $0.isEmpty ? nil : $0 }
-        let request = info["request"]
+        // Any local process can post these distributed notifications, so treat
+        // every field as untrusted input: bound sizes, validate ids and only
+        // accept transcript paths inside ~/.claude/projects.
+        let id = info["session_id"].flatMap { Self.isSafeID($0) ? $0 : nil } ?? Self.globalSessionID
+        let cwd = String((info["cwd"] ?? "").prefix(1024))
+        let transcriptPath = info["transcript_path"].flatMap(Self.validatedTranscriptPath)
+        let request = info["request"].map { String($0.prefix(40)) }
         let remove = info["remove"] == "1"
+        let needsAnswer = newState == .waiting && info["kind"] == "question"
         let now = Date()
         let oldState = sessions[id]?.state
 
@@ -164,28 +203,51 @@ final class AppState: ObservableObject {
             if !cwd.isEmpty { existing.cwd = cwd }
             if let transcriptPath { existing.transcriptPath = transcriptPath }
             existing.pendingRequest = (newState == .waiting) ? request : nil
+            existing.needsAnswer = needsAnswer
             sessions[id] = existing
         } else {
             sessions[id] = Session(id: id, cwd: cwd, state: newState, lastActivity: now,
                                    transcriptPath: transcriptPath,
-                                   pendingRequest: (newState == .waiting) ? request : nil)
+                                   pendingRequest: (newState == .waiting) ? request : nil,
+                                   needsAnswer: needsAnswer)
         }
 
         lastActivity = now
         refreshAggregate()
-        if newState == .done { loadUsageStats() }
+        if oldState == nil { loadModel() }   // pick up model changes made elsewhere
         if let path = transcriptPath ?? sessions[id]?.transcriptPath, !remove {
             enrich(sessionID: id, transcriptPath: path)
         }
 
         // Notify on entering a new attention state (not on every repeat hook).
-        if !remove, let session = sessions[id], newState != oldState {
+        // A request that was answered must not leave a stale "Approve" banner.
+        if oldState == .waiting && newState != .waiting {
+            NotificationManager.shared.clearWaiting(sessionID: id)
+        }
+        if !remove, notificationsEnabled, let session = sessions[id], newState != oldState {
             if newState == .waiting {
                 NotificationManager.shared.notifyWaiting(session: session)
             } else if newState == .done {
                 NotificationManager.shared.notifyDone(session: session)
             }
         }
+    }
+
+    private static func isSafeID(_ id: String) -> Bool {
+        !id.isEmpty && id.count <= 100
+            && id.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_" }
+    }
+
+    private static let transcriptRoot = URL(fileURLWithPath: NSHomeDirectory() + "/.claude/projects")
+        .resolvingSymlinksInPath().path + "/"
+
+    private static func validatedTranscriptPath(_ path: String) -> String? {
+        guard !path.isEmpty, path.count < 1024, path.hasSuffix(".jsonl") else { return nil }
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        guard resolved.hasPrefix(transcriptRoot) else { return nil }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resolved, isDirectory: &isDir), !isDir.boolValue else { return nil }
+        return resolved
     }
 
     private var enrichingSessions: Set<String> = []
@@ -222,8 +284,10 @@ final class AppState: ObservableObject {
         let size = (try? handle.seekToEnd()) ?? 0
         let start = size > maxBytes ? size - maxBytes : 0
         try? handle.seek(toOffset: start)
-        guard let data = try? handle.readToEnd(),
-              let text = String(data: data, encoding: .utf8) else { return (nil, nil) }
+        guard let data = try? handle.read(upToCount: Int(maxBytes)) else { return (nil, nil) }
+        // Lossy decode: the tail can start in the middle of a multi-byte
+        // character; that only damages the first (partial) line we skip anyway.
+        let text = String(decoding: data, as: UTF8.self)
 
         var branch: String?
         var activity: String?
@@ -292,84 +356,51 @@ final class AppState: ObservableObject {
             }
         }
         if changed { refreshAggregate() }
-    }
-
-    // MARK: history.jsonl watcher — keeps usage counts fresh
-
-    private func startHistoryWatcher() {
-        let path = NSHomeDirectory() + "/.claude/history.jsonl"
-        let fd = open(path, O_EVTONLY)
-        guard fd >= 0 else { return }
-        historyFD = fd
-
-        let src = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: .write,
-            queue: .global(qos: .background)
-        )
-        src.setEventHandler { [weak self] in
-            Task { @MainActor [weak self] in self?.loadUsageStats() }
-        }
-        src.setCancelHandler { close(fd) }
-        src.resume()
-        historyWatcher = src
+        // Re-arms the history watcher if the file appeared/was replaced, and
+        // rolls the counts over at midnight / week start.
+        usageTracker?.poll()
     }
 
     // MARK: Model
+    // Reads/writes the "model" key of ~/.claude/settings.json. The file is the
+    // user's real Claude Code config, so: re-read right before writing, keep
+    // every other key, write atomically, and never write if it can't be parsed.
+
+    private static var settingsURL: URL {
+        URL(fileURLWithPath: NSHomeDirectory() + "/.claude/settings.json")
+    }
 
     func setModel(_ model: String) {
-        let path = NSHomeDirectory() + "/.claude/settings.json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        json["model"] = model
-        if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-            try? out.write(to: URL(fileURLWithPath: path))
+        let url = Self.settingsURL
+        // Only a missing file may be created from scratch. Any other read
+        // problem, an empty file or invalid JSON: leave the file alone.
+        var json: [String: Any] = [:]
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard let data = try? Data(contentsOf: url),
+                  let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                NSLog("ClaudeMenuBar: can't read settings.json as a JSON object; not touching it")
+                return
+            }
+            json = parsed
         }
-        currentModel = model
+        if model == Self.defaultModelID { json.removeValue(forKey: "model") }
+        else { json["model"] = model }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            let out = try JSONSerialization.data(withJSONObject: json,
+                                                 options: [.prettyPrinted, .withoutEscapingSlashes])
+            try out.write(to: url, options: .atomic)
+            currentModel = model
+        } catch {
+            NSLog("ClaudeMenuBar: could not write settings.json: \(error)")
+        }
     }
 
     private func loadModel() {
-        let path = NSHomeDirectory() + "/.claude/settings.json"
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let model = json["model"] as? String else { return }
-        currentModel = model
-    }
-
-    // MARK: Usage stats
-
-    func loadUsageStats() {
-        Task.detached(priority: .background) {
-            let home = NSHomeDirectory()
-            let histPath = home + "/.claude/history.jsonl"
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: histPath)),
-                  let text = String(data: data, encoding: .utf8) else { return }
-
-            let now = Date()
-            let calendar = Calendar.current
-            let weekStart = calendar.date(
-                from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
-            ) ?? now.addingTimeInterval(-7 * 86400)
-            let dayStart = calendar.startOfDay(for: now)  // today's messages = "session"
-
-            var weekly = 0
-            var today  = 0
-            for line in text.split(separator: "\n") {
-                guard let lineData = line.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                      let ts = json["timestamp"] as? Double else { continue }
-                let date = Date(timeIntervalSince1970: ts / 1000.0)
-                if date >= weekStart { weekly += 1 }
-                if date >= dayStart  { today  += 1 }
-            }
-
-            let wc = weekly
-            let tc = today
-            await MainActor.run {
-                self.weeklyMessages  = wc
-                self.sessionMessages = tc
-            }
-        }
+        guard let data = try? Data(contentsOf: Self.settingsURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        currentModel = (json["model"] as? String) ?? Self.defaultModelID
     }
 
     // MARK: Approval
@@ -384,24 +415,28 @@ final class AppState: ObservableObject {
         // could confirm a destructive prompt. No session context → do nothing.
         guard let id = sessionID, let session = sessions[id] else { return }
 
-        WindowFocuser.focus(projectName: session.displayName) { [weak self] focused in
-            guard let self else { return }
-            // If we couldn't find the session's window, do NOT type into
-            // whatever is frontmost. Leave the Approve button so the user
-            // knows it didn't go through, and can approve manually.
-            guard focused else { return }
+        // requireUnique: if two terminal windows match this project name we
+        // can't tell which one is waiting, so refuse rather than guess.
+        // Questions need a typed answer, and Approve may be switched off: in
+        // both cases just bring the terminal forward.
+        guard oneClickApprove, !session.needsAnswer else { focusTerminal(for: session); return }
 
-            // Optimistically flip back to `running` so Approve disappears now;
-            // the next PreToolUse hook confirms it anyway.
-            if var s = self.sessions[id] {
-                s.state = .running
-                s.lastActivity = Date()
-                self.sessions[id] = s
-                self.refreshAggregate()
-            }
+        let request = session.pendingRequest
+        WindowFocuser.focus(projectName: session.displayName, requireUnique: true) { [weak self] target in
+            // If we couldn't single out the session's window, do NOT type into
+            // whatever is frontmost. The Approve button stays so the user can
+            // approve by hand.
+            guard let target else { return }
 
-            // Send the keystrokes once the activated window has settled.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            // Type once the raised window has settled, re-checking everything
+            // at that moment: still opted in, the same request still waiting,
+            // and exactly that window focused. The state itself is left to
+            // the next hook (PreToolUse), which also clears the banner.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self, self.oneClickApprove,
+                      let current = self.sessions[id], current.state == .waiting,
+                      current.pendingRequest == request, !current.needsAnswer,
+                      WindowFocuser.isFocused(target) else { return }
                 let src = CGEventSource(stateID: .hidSystemState)
                 let yDown   = CGEvent(keyboardEventSource: src, virtualKey: 0x10, keyDown: true)
                 let yUp     = CGEvent(keyboardEventSource: src, virtualKey: 0x10, keyDown: false)
@@ -437,6 +472,5 @@ final class AppState: ObservableObject {
 
     deinit {
         sweepTimer?.invalidate()
-        historyWatcher?.cancel()
     }
 }

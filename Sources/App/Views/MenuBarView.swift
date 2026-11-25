@@ -28,9 +28,9 @@ struct MenuBarView: View {
                     .foregroundStyle(.purple)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text("Claude Code")
+                Text("Claude Menu Bar")
                     .font(.headline)
-                Text("Menu Bar Monitor")
+                Text("Unofficial monitor for Claude Code · v\(appVersion)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -79,14 +79,47 @@ struct MenuBarView: View {
             ) {
                 appState.toggleLaunchAtLogin()
             }
+            MenuRowToggle(
+                title: "Notifications",
+                icon: "bell",
+                isOn: appState.notificationsEnabled
+            ) {
+                appState.notificationsEnabled.toggle()
+            }
+            MenuRowToggle(
+                title: "Show Prompt in Banners",
+                icon: "text.bubble",
+                isOn: appState.notificationPreviews
+            ) {
+                appState.notificationPreviews.toggle()
+            }
+            MenuRowToggle(
+                title: "One-Click Approve",
+                icon: "checkmark.shield",
+                isOn: appState.oneClickApprove
+            ) {
+                appState.oneClickApprove.toggle()
+            }
+            if appState.oneClickApprove {
+                Text("Types y + Return into the matching terminal. Needs Accessibility permission.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            #if DEBUG
             Divider().padding(.vertical, 2)
-            MenuRowButton(title: "Force: Running", icon: "play.fill") {
+            MenuRowButton(title: "Debug: Force Running", icon: "play.fill") {
                 appState.apply(.running)
             }
-            MenuRowButton(title: "Force: Idle", icon: "stop.fill") {
+            MenuRowButton(title: "Debug: Force Idle", icon: "stop.fill") {
                 appState.apply(.idle)
             }
+            #endif
             Divider().padding(.vertical, 2)
+            MenuRowButton(title: "About / GitHub", icon: "info.circle") {
+                NSWorkspace.shared.open(URL(string: "https://github.com/aryanpappu/ClaudeMenuBar")!)
+            }
             MenuRowButton(title: "Quit", icon: "power", tint: .red) {
                 NSApplication.shared.terminate(nil)
             }
@@ -94,6 +127,10 @@ struct MenuBarView: View {
     }
 
     // MARK: - Helpers
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+    }
 
     private var stateLabel: String {
         switch appState.state {

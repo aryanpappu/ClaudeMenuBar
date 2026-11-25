@@ -147,6 +147,7 @@ struct FloatingIconView: View {
                                 SessionRow(
                                     session: session,
                                     accessibilityGranted: appState.isAccessibilityGranted,
+                                    oneClickApprove: appState.oneClickApprove && !session.needsAnswer,
                                     onApprove: { appState.sendApproval(for: session.id) },
                                     onFocus: { appState.focusTerminal(for: session) }
                                 )
@@ -170,7 +171,7 @@ struct FloatingIconView: View {
             }
 
             if appState.modelExpanded {
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     ForEach(appState.modelOptions) { option in
                         ModelPill(
                             label: option.label,
@@ -195,7 +196,7 @@ struct FloatingIconView: View {
 
             if appState.statsExpanded {
                 VStack(spacing: 8) {
-                    StatRow(label: "This Session", value: appState.sessionMessages, unit: "msgs", color: iconColor)
+                    StatRow(label: "Today", value: appState.todayMessages, unit: "msgs", color: iconColor)
                     StatRow(label: "This Week",    value: appState.weeklyMessages,  unit: "msgs", color: .blue)
                     soundRow
                 }
@@ -303,10 +304,13 @@ private struct ModelPill: View {
     var body: some View {
         Button(action: action) {
             Text(label)
-                .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                .font(.system(size: 10, weight: isActive ? .semibold : .regular))
                 .foregroundStyle(isActive ? .black : .white.opacity(0.55))
-                .padding(.horizontal, 10)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .padding(.horizontal, 4)
                 .padding(.vertical, 5)
+                .frame(maxWidth: .infinity)   // four pills share the row evenly
                 .background(
                     Capsule()
                         .fill(isActive ? Color.white : Color.white.opacity(0.1))
@@ -320,6 +324,7 @@ private struct ModelPill: View {
 private struct SessionRow: View {
     let session: Session
     let accessibilityGranted: Bool
+    let oneClickApprove: Bool
     let onApprove: () -> Void
     let onFocus: () -> Void
 
@@ -346,11 +351,13 @@ private struct SessionRow: View {
             Spacer(minLength: 4)
 
             if session.state == .waiting {
-                Button(action: onApprove) {
+                // With one-click Approve off (the default) the button only
+                // brings the terminal forward; the user answers there.
+                Button(action: oneClickApprove ? onApprove : onFocus) {
                     HStack(spacing: 3) {
-                        Image(systemName: accessibilityGranted ? "checkmark" : "lock.fill")
+                        Image(systemName: buttonIcon)
                             .font(.system(size: 9, weight: .bold))
-                        Text(accessibilityGranted ? "Approve" : "Grant")
+                        Text(buttonLabel)
                             .font(.system(size: 10, weight: .semibold))
                     }
                     .foregroundStyle(.black)
@@ -358,7 +365,7 @@ private struct SessionRow: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(accessibilityGranted ? Color.green : Color.yellow)
+                            .fill(buttonColor)
                     )
                 }
                 .buttonStyle(.plain)
@@ -372,6 +379,21 @@ private struct SessionRow: View {
         .frame(height: 34)
         .contentShape(Rectangle())
         .onTapGesture { onFocus() }   // click a row → raise its terminal
+    }
+
+    private var buttonLabel: String {
+        if !accessibilityGranted { return "Grant" }
+        return oneClickApprove ? "Approve" : "Open"
+    }
+
+    private var buttonIcon: String {
+        if !accessibilityGranted { return "lock.fill" }
+        return oneClickApprove ? "checkmark" : "arrow.up.forward.app"
+    }
+
+    private var buttonColor: Color {
+        if !accessibilityGranted { return .yellow }
+        return oneClickApprove ? .green : .orange
     }
 
     // When waiting, lead with what's being requested ("wants Bash"); otherwise

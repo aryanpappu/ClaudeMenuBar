@@ -10,11 +10,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var floatingPanel: FloatingPanel?   // strong ref in delegate — panel can't be released
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        try? "didFinish".write(toFile: "/tmp/cmb.txt", atomically: true, encoding: .utf8)
         NotificationManager.shared.setup()
         setupStatusItem()
         setupFloatingPanel()
-        try? "done".write(toFile: "/tmp/cmb.txt", atomically: true, encoding: .utf8)
     }
 
     // MARK: Status item
@@ -40,11 +38,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let pop = NSPopover()
-        pop.contentSize = NSSize(width: 280, height: 310)
         pop.behavior = .transient
-        pop.contentViewController = NSHostingController(
+        let controller = NSHostingController(
             rootView: MenuBarView().environmentObject(AppState.shared)
         )
+        controller.sizingOptions = .preferredContentSize   // popover follows the SwiftUI size
+        pop.contentViewController = controller
         popover = pop
         pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     }
@@ -55,7 +54,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let panel = FloatingPanel(appState: AppState.shared)
         floatingPanel = panel                   // retain in AppDelegate
         AppState.shared.floatingPanel = panel   // also pass to AppState for show/hide control
-        panel.orderFrontRegardless()
-        try? "panelOrdered".write(toFile: "/tmp/cmb.txt", atomically: true, encoding: .utf8)
+        if AppState.shared.showFloatingIcon { panel.orderFrontRegardless() }
     }
 }

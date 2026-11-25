@@ -41,6 +41,18 @@ final class FloatingPanel: NSPanel {
                 self?.resize(to: height)
             }
             .store(in: &cancellables)
+
+        // A display was unplugged or rearranged: bring the panel back if it is
+        // no longer on any screen.
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(self.frame) }) {
+                    self.placeOnScreen()
+                }
+            }
+            .store(in: &cancellables)
     }
 
     override var canBecomeKey: Bool { false }

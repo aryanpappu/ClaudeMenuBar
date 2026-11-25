@@ -11,6 +11,7 @@ final class NotificationManager: NSObject {
 
     private enum Category {
         static let waiting = "WAITING"
+        static let waitingOpenOnly = "WAITING_OPEN"
         static let done = "DONE"
     }
     private enum Action {
@@ -24,12 +25,17 @@ final class NotificationManager: NSObject {
         center.delegate = self
 
         let approve = UNNotificationAction(identifier: Action.approve, title: "Approve", options: [])
+        let openAction = UNNotificationAction(identifier: Action.focus, title: "Open", options: [.foreground])
         let focus = UNNotificationAction(identifier: Action.focus, title: "Focus", options: [.foreground])
         let waiting = UNNotificationCategory(identifier: Category.waiting,
                                              actions: [approve, focus], intentIdentifiers: [])
+        // Same banner without the Approve button, used while one-click
+        // Approve is turned off.
+        let waitingOpenOnly = UNNotificationCategory(identifier: Category.waitingOpenOnly,
+                                                     actions: [openAction], intentIdentifiers: [])
         let done = UNNotificationCategory(identifier: Category.done,
                                           actions: [focus], intentIdentifiers: [])
-        center.setNotificationCategories([waiting, done])
+        center.setNotificationCategories([waiting, waitingOpenOnly, done])
 
         // Alert only — the app already plays its own SoundManager cues, so we
         // don't want a duplicate system notification sound.
@@ -42,8 +48,11 @@ final class NotificationManager: NSObject {
     func notifyWaiting(session: Session) {
         let content = UNMutableNotificationContent()
         content.title = "Approval needed — \(session.displayName)"
-        content.body = session.pendingRequest.map { "Wants to use \($0)" } ?? "Claude needs your permission"
-        content.categoryIdentifier = Category.waiting
+        content.body = session.needsAnswer
+            ? "Claude has a question for you"
+            : session.pendingRequest.map { "Wants to use \($0)" } ?? "Claude needs your permission"
+        content.categoryIdentifier = (AppState.shared.oneClickApprove && !session.needsAnswer)
+            ? Category.waiting : Category.waitingOpenOnly
         content.userInfo = ["session_id": session.id]
         post(content, id: "waiting-\(session.id)")
     }
@@ -51,10 +60,18 @@ final class NotificationManager: NSObject {
     func notifyDone(session: Session) {
         let content = UNMutableNotificationContent()
         content.title = "Done — \(session.displayName)"
-        content.body = session.activity ?? "Task finished"
+        content.body = (AppState.shared.notificationPreviews ? session.activity : nil) ?? "Task finished"
         content.categoryIdentifier = Category.done
         content.userInfo = ["session_id": session.id]
         post(content, id: "done-\(session.id)")
+    }
+
+    /// Removes a delivered/pending "approval needed" banner once the request
+    /// has been answered, so its Approve action can't fire later.
+    func clearWaiting(sessionID: String) {
+        let id = "waiting-\(sessionID)"
+        center.removeDeliveredNotifications(withIdentifiers: [id])
+        center.removePendingNotificationRequests(withIdentifiers: [id])
     }
 
     private func post(_ content: UNMutableNotificationContent, id: String) {
