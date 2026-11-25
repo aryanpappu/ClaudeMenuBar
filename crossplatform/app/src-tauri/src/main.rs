@@ -10,7 +10,7 @@
 mod focus;
 
 use claude_menubar_core::{
-    model, paths,
+    hooks, model, paths,
     protocol::{self, Kind, SessionFile, State},
     sessions::{self, Event, SessionStore},
     usage::UsageTracker,
@@ -50,12 +50,13 @@ struct Prefs {
     notifications: bool,
     show_panel: bool,
     sections: BTreeMap<String, bool>,
+    setup_hint_shown: bool,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
         let sections = ["sessions", "model", "activity"].iter().map(|s| (s.to_string(), true)).collect();
-        Prefs { muted: false, rain_muted: false, notifications: true, show_panel: true, sections }
+        Prefs { muted: false, rain_muted: false, notifications: true, show_panel: true, sections, setup_hint_shown: false }
     }
 }
 
@@ -399,6 +400,67 @@ fn toggle_panel(app: &AppHandle) {
     set_panel_visible(app, !visible);
 }
 
+// MARK: Hook setup (tray menu)
+
+const HELPER_NAME: &str = if cfg!(windows) { "claude-notify.exe" } else { "claude-notify" };
+
+/// The helper shipped inside the installed app (Tauri `externalBin`, placed
+/// next to the main executable).
+fn bundled_helper() -> Option<PathBuf> {
+    let path = std::env::current_exe().ok()?.parent()?.join(HELPER_NAME);
+    path.is_file().then_some(path)
+}
+
+/// Where hooks point to. A fixed path, because the app's own location can
+/// change (AppImage mounts at a new path on every launch, updates move files).
+fn stable_helper_path() -> Option<PathBuf> {
+    if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("ClaudeMenuBar").join("bin").join(HELPER_NAME))
+    } else {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("bin").join(HELPER_NAME))
+    }
+}
+
+fn setup_hooks() -> Result<String, String> {
+    let source = bundled_helper().ok_or("The claude-notify helper is missing from this installation.")?;
+    let target = stable_helper_path().ok_or("Can't find your home folder.")?;
+    if let Some(dir) = target.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("Can't create {}: {e}", dir.display()))?;
+    }
+    if source != target {
+        let tmp = target.with_extension("new");
+        fs::copy(&source, &tmp).map_err(|e| format!("Can't copy the helper: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755));
+        }
+        fs::rename(&tmp, &target).map_err(|e| format!("Can't install the helper: {e}"))?;
+    }
+    let settings = paths::settings_path().map_err(|e| e.to_string())?;
+    let prefix = hooks::quote_helper(&target).map_err(|e| e.to_string())?;
+    let report = hooks::install(&settings, &prefix, false).map_err(|e| format!("Couldn't update {}: {e}", settings.display()))?;
+    Ok(if report.changes.is_empty() {
+        "Claude Code hooks were already set up.".into()
+    } else {
+        format!("Added {} Claude Code hooks. Restart running Claude Code sessions to pick them up.", report.changes.len())
+    })
+}
+
+fn remove_hooks() -> Result<String, String> {
+    let settings = paths::settings_path().map_err(|e| e.to_string())?;
+    let report = hooks::uninstall(&settings, false).map_err(|e| format!("Couldn't update {}: {e}", settings.display()))?;
+    Ok(if report.changes.is_empty() { "No Claude Menu Bar hooks were found.".into() } else { "Claude Code hooks removed.".into() })
+}
+
+fn tell(app: &AppHandle, result: Result<String, String>) {
+    let (title, body) = match result {
+        Ok(msg) => ("Claude Menu Bar", msg),
+        Err(msg) => ("Claude Menu Bar: something went wrong", msg),
+    };
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
 // MARK: Commands (called from ui/app.js)
 
 #[tauri::command]
@@ -471,9 +533,12 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show / hide panel", true, None::<&str>)?;
     let notifications = CheckMenuItem::with_id(app, "notifications", "Notifications", true, notifications_on, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(app, "autostart", "Start at login", true, autostart_on, None::<&str>)?;
+    let setup = MenuItem::with_id(app, "setup_hooks", "Set up Claude Code hooks", true, None::<&str>)?;
+    let remove = MenuItem::with_id(app, "remove_hooks", "Remove Claude Code hooks", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Claude Menu Bar", true, None::<&str>)?;
-    let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&show, &notifications, &autostart, &separator, &quit])?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&show, &notifications, &autostart, &sep1, &setup, &remove, &sep2, &quit])?;
     app.manage(TrayItems { notifications: notifications.clone() });
 
     let mut builder = TrayIconBuilder::with_id(TRAY)
@@ -495,6 +560,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 let _ = if autostart.is_checked().unwrap_or(false) { launcher.enable() } else { launcher.disable() };
                 let _ = autostart.set_checked(launcher.is_enabled().unwrap_or(false));
             }
+            "setup_hooks" => tell(app, setup_hooks()),
+            "remove_hooks" => tell(app, remove_hooks()),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -550,6 +617,21 @@ fn main() {
                 }
             }
             build_tray(&handle)?;
+            // First launch: point people at the one-time hook setup.
+            {
+                let data = handle.state::<AppData>();
+                let mut inner = data.lock();
+                if !inner.prefs.setup_hint_shown {
+                    inner.prefs.setup_hint_shown = true;
+                    save_prefs(&inner);
+                    let _ = handle
+                        .notification()
+                        .builder()
+                        .title("Claude Menu Bar is running")
+                        .body("Open the tray menu and choose \"Set up Claude Code hooks\" once.")
+                        .show();
+                }
+            }
             if let Some(win) = handle.get_webview_window(PANEL) {
                 let hide_handle = handle.clone();
                 win.on_window_event(move |event| {

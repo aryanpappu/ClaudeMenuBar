@@ -1,6 +1,6 @@
 # Claude Menu Bar
 
-A small macOS menu bar app that shows what your **Claude Code** sessions are doing, so you can stop watching the terminal.
+A small menu bar / system tray app that shows what your **Claude Code** sessions are doing, so you can stop watching the terminal. Native on **macOS**; also runs on **Windows** and **Linux** (see [Windows and Linux](#windows-and-linux)).
 
 - **Working, waiting or done at a glance:** the menu bar icon and a floating panel change as Claude works.
 - **Every session in one list:** each running Claude Code session gets its own row with its project, git branch and what it is working on.
@@ -9,17 +9,22 @@ A small macOS menu bar app that shows what your **Claude Code** sessions are doi
 - **Quick model switch:** set the default model (Auto, Haiku, Sonnet, Opus) for new sessions.
 - **Usage counter:** how many prompts you sent today and this week.
 
-<p align="center"><img src="docs/images/panel.png" width="260" alt="Floating panel showing one session waiting for approval and two sessions working"></p>
+<p align="center">
+  <img src="docs/images/panel.png" width="240" alt="macOS: floating panel showing one session waiting for approval and two sessions working">
+  &nbsp;&nbsp;
+  <img src="docs/images/linux-panel.png" width="240" alt="Linux: the same panel in the Tauri app">
+</p>
+<p align="center"><sub>macOS (left) and Linux (right)</sub></p>
 
 > **Unofficial.** This is a community project. It is not made by, affiliated with or endorsed by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic.
 
-## Requirements
+## Requirements (macOS)
 
 - macOS 15 (Sequoia) or newer
 - Xcode 16 or newer (to build from source)
 - [Claude Code](https://code.claude.com) with hooks support
 
-## Install
+## Install on macOS
 
 ```bash
 git clone https://github.com/aryanpappu/ClaudeMenuBar.git
@@ -45,11 +50,28 @@ New Claude Code sessions start reporting straight away. Sessions that were alrea
 
 This removes only this app's hooks (yours are kept), the helper and the app.
 
+## Windows and Linux
+
+A separate tray app (Rust + Tauri) in [`crossplatform/`](crossplatform/README.md) shows the same panel. It uses the same session files and hook rules ([docs/PROTOCOL.md](docs/PROTOCOL.md)).
+
+1. Download the installer for your system from the [latest release](https://github.com/aryanpappu/ClaudeMenuBar/releases), or from the newest successful "windows-linux" run under *Actions*:
+   - Windows: `.msi` or `-setup.exe`
+   - Linux: `.deb`, `.rpm` or `.AppImage`
+2. Start **Claude Menu Bar**. Its icon appears in the system tray.
+3. In the tray menu, choose **Set up Claude Code hooks** once. Restart open Claude Code sessions.
+
+What's different from the Mac:
+- **Open** works when the terminal's window title contains the project folder name. On Linux it needs `wmctrl`; on Wayland it copies the project path instead.
+- One-Click Approve isn't available.
+- On GNOME, the tray icon needs the AppIndicator extension.
+
+Claude Code inside **WSL** with the app on Windows: run `claude-notify install-hooks --wsl` inside WSL (details in [crossplatform/README.md](crossplatform/README.md#wsl)).
+
 ## How it works
 
 ```
-Claude Code hook ──► claude-notify <state> ──► macOS distributed notification ──► Claude Menu Bar
- (stdin: session JSON)    (~50 ms, silent)       com.claudemenubar.state.*          (per-session state)
+Claude Code hook ──► claude-notify <state> ──► ~/.claude-menubar/sessions/<id>.json ──► Claude Menu Bar
+ (stdin: session JSON)    (fast, silent)          (one small file per session)          (watches the folder)
 ```
 
 | Hook | State | Meaning |
@@ -84,6 +106,7 @@ Everything stays on your Mac. The app makes no network requests. It only opens t
 
 | File | Access | Why |
 |---|---|---|
+| `~/.claude-menubar/sessions/*.json` (Windows: `%LOCALAPPDATA%\ClaudeMenuBar\sessions`) | written by the helper, read by the app | One small file per session: state, project folder, requested tool. No prompt text. Deleted when the session ends; leftovers are removed after 24 hours. |
 | `~/.claude/history.jsonl` | read | Counts today's and this week's prompts. Only this week's timestamps are kept in memory, never the prompt text. After the first read, only new lines are read. |
 | `~/.claude/projects/**/*.jsonl` (session transcripts) | read, last 64 KB | Shows the git branch and the session title in the session row. Paths outside this folder are refused. |
 | `~/.claude/settings.json` | read; write when you pick a model | Changes only the `model` key. The file is re-read just before writing and replaced atomically. If it isn't valid JSON, the app doesn't touch it. |

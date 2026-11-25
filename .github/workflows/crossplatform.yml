@@ -1,0 +1,105 @@
+name: windows-linux
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  helper:
+    name: helper (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crossplatform
+      - name: Unit tests (core + helper)
+        working-directory: crossplatform
+        run: cargo test -p claude_menubar_core -p claude-notify
+      - name: Build helper
+        working-directory: crossplatform
+        run: cargo build --release -p claude-notify
+      - name: Shared protocol tests
+        run: |
+          exe=crossplatform/target/release/claude-notify
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          python3 protocol/run_vectors.py "$exe" || python protocol/run_vectors.py "$exe"
+
+  app:
+    name: app (${{ matrix.os }})
+    needs: helper
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crossplatform
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libxdo-dev patchelf
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2
+      - name: Build helper and place it next to the app (Tauri externalBin)
+        working-directory: crossplatform
+        run: |
+          set -euo pipefail
+          cargo build --release -p claude-notify
+          triple=$(rustc -vV | sed -n 's/host: //p')
+          mkdir -p app/src-tauri/binaries
+          ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
+          cp "target/release/claude-notify$ext" "app/src-tauri/binaries/claude-notify-$triple$ext"
+      - name: App unit tests
+        working-directory: crossplatform
+        run: cargo test -p claude-menu-bar
+      - name: Build installers
+        working-directory: crossplatform/app/src-tauri
+        run: cargo tauri build
+      - name: Collect
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          b=crossplatform/target/release/bundle
+          find "$b" -maxdepth 2 -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.msi' -o -name '*-setup.exe' \) -exec cp {} dist/ \;
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-menu-bar-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: attach to GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: app
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: true

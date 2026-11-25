@@ -9,3 +9,4 @@ Config/Signing.local.xcconfig
 __pycache__/
 crossplatform/target/
 crossplatform/app/src-tauri/gen/
+crossplatform/app/src-tauri/binaries/
